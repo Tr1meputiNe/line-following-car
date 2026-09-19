@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="760" viewBox="0 0 1200 760">
+  <style>
+    text { font-family: Arial, "PingFang SC", sans-serif; fill: #18232f; }
+    .title { font-size: 28px; font-weight: 700; }
+    .label { font-size: 18px; }
+    .small { font-size: 15px; }
+    .board { fill: #e8f2ff; stroke: #2470b5; stroke-width: 3; }
+    .module { fill: #edf8ee; stroke: #317d40; stroke-width: 3; }
+    .pin { fill: #fff; stroke: #455a64; stroke-width: 2; }
+    .wire { fill: none; stroke-width: 5; stroke-linecap: round; stroke-linejoin: round; }
+  </style>
+  <rect width="1200" height="760" fill="#ffffff"/>
+  <text class="title" x="60" y="55">Arduino Uno + I²C SSD1306 OLED + 按键接线图</text>
+  <text class="small" x="60" y="85">按键使用 INPUT_PULLUP：未按为 HIGH，按下时接地为 LOW，无需外接上拉电阻。</text>
+
+  <rect class="board" x="70" y="150" width="390" height="465" rx="20"/>
+  <text class="title" x="172" y="200">Arduino Uno</text>
+  <text class="small" x="180" y="228">（板载 I²C：A4 / A5）</text>
+
+  <rect class="pin" x="330" y="260" width="105" height="35" rx="6"/>
+  <text class="label" x="342" y="285">GND</text>
+  <rect class="pin" x="330" y="320" width="105" height="35" rx="6"/>
+  <text class="label" x="342" y="345">5V</text>
+  <rect class="pin" x="330" y="380" width="105" height="35" rx="6"/>
+  <text class="label" x="342" y="405">A5 / SCL</text>
+  <rect class="pin" x="330" y="440" width="105" height="35" rx="6"/>
+  <text class="label" x="342" y="465">A4 / SDA</text>
+  <rect class="pin" x="105" y="500" width="105" height="35" rx="6"/>
+  <text class="label" x="120" y="525">D2</text>
+  <rect class="pin" x="105" y="560" width="105" height="35" rx="6"/>
+  <text class="label" x="120" y="585">GND</text>
+
+  <rect class="module" x="780" y="210" width="320" height="250" rx="16"/>
+  <text class="title" x="820" y="255">0.96″ OLED</text>
+  <text class="small" x="843" y="282">SSD1306 · I²C · 128×64</text>
+  <rect class="pin" x="815" y="310" width="110" height="32" rx="6"/>
+  <text class="label" x="838" y="333">GND</text>
+  <rect class="pin" x="815" y="355" width="110" height="32" rx="6"/>
+  <text class="label" x="842" y="378">VCC</text>
+  <rect class="pin" x="815" y="400" width="110" height="32" rx="6"/>
+  <text class="label" x="842" y="423">SCL</text>
+  <rect class="pin" x="965" y="310" width="110" height="32" rx="6"/>
+  <text class="label" x="994" y="333">SDA</text>
+
+  <rect class="module" x="795" y="570" width="255" height="85" rx="14"/>
+  <text class="label" x="845" y="605">按键（常开）</text>
+  <circle class="pin" cx="830" cy="630" r="12"/>
+  <circle class="pin" cx="1015" cy="630" r="12"/>
+  <text class="small" x="807" y="681">一端 D2，另一端 GND</text>
+
+  <path class="wire" stroke="#202124" d="M435 277 H600 V326 H815"/>
+  <path class="wire" stroke="#d32f2f" d="M435 337 H620 V371 H815"/>
+  <path class="wire" stroke="#f9a825" d="M435 397 H650 V416 H815"/>
+  <path class="wire" stroke="#1976d2" d="M435 457 H680 V326 H965"/>
+  <path class="wire" stroke="#7b1fa2" d="M210 517 H600 V630 H818"/>
+  <path class="wire" stroke="#202124" d="M210 577 H650 V630 H1003"/>
+
+  <text class="small" x="485" y="266">黑：GND</text>
+  <text class="small" x="488" y="325">红：5V</text>
+  <text class="small" x="488" y="385">黄：SCL</text>
+  <text class="small" x="488" y="447">蓝：SDA</text>
+  <text class="small" x="490" y="507">紫：D2</text>
+  <text class="small" x="495" y="567">黑：GND</text>
+
+  <text class="small" x="70" y="720">OLED I²C 地址按常见模块设为 0x3C；若屏幕无响应，先扫描确认模块地址是否为 0x3D。</text>
+</svg>

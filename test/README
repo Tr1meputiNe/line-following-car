@@ -1,0 +1,17 @@
+这个目录不是 PlatformIO 单元测试目录。
+
+里面是课程小作业（#1~#5）的参考程序和提交文档，以及课程 PPT。
+它们【不参与编译】—— platformio.ini 里用 build_src_filter 把编译范围
+限制在 src/main.cpp 和 src/bringup.cpp 两个文件上。
+
+目录内容：
+  Blink.cpp  press.cpp  light1.cpp  light2.cpp  ADD.cpp  vmap.cpp  oled.cpp
+      之前小作业的参考程序
+  光电循迹小车设计与制作2024.pptx
+      课程 PPT（大作业要求的来源）
+  作业提交文件/
+      小作业 #1~#5 的文档
+
+正式程序在 ../src/ 下：
+  ../src/main.cpp       正式程序
+  ../src/bringup.cpp    分步测试程序
