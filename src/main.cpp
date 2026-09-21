@@ -72,14 +72,18 @@ int trimLeft = 0;
 int fastLeft = speedFast + trimLeft;   // 左轮直行速度，自动算出来
 int turnLeft = speedTurn + trimLeft;   // 左轮转弯外侧速度，自动算出来
 
-int speedKick  = 200;    // 起步"踢一脚"的速度。原来写死 255，太猛会把 5V 拉塌
-int startKickMs = 100;   // 踢多久（毫秒）
-// 直流电机静止时阻力比转动时大得多，直接给循迹速度常常原地不转，所以要踢一脚。
-// 【但踢太狠会复位】255 满速踢两个堵转的电机，是全程电流最大的一瞬间；
-//   如果电机电源取自 Arduino 的 5V（USB 供电还有 500mA 保险丝），
-//   这一下会把 5V 拉到 2.7V 以下 -> AVR 欠压复位 -> setup() 把电机清零 -> 车"冲一步就停"。
-//   两种改法：① 把 speedKick 降到 150~180、startKickMs 降到 60~100（软件缓解）
-//             ② 给电机单独供电（根治，见 README 第九节）
+int speedKick  = 200;    // 软起动升到的最高速度
+int startKickMs = 100;   // 升到顶之后再保持多久（毫秒）
+int rampStep   = 5;      // 每档加多少
+int rampStepMs = 15;     // 每档停多少毫秒
+// 直流电机静止时是堵转，启动电流最大。如果一步跳到 200，这一下会把 5V 拉到
+// AVR 的欠压阈值（2.7V）以下 -> 复位 -> setup() 把电机清零 -> 车"冲一步就停"。
+// 【实测】一步跳到 200 时，起步后最低电压只有 2.85V（这个读法偏高约 7%，实际约 2.66V）。
+// 所以改成"软起动"：5、10、15…… 一档一档加上去，共 40 档 × 15ms ≈ 600ms。
+// 好处是电机在"刚好能转起来"的那个电压上脱离静摩擦，那时的电流比一步给到 200 小得多。
+//
+// 如果软起动之后还是复位，就说明供电彻底不够了，只能改硬件：
+//   电机电源单独走电池盒 -> MX1508 的 VM，Arduino 单独走 USB，两边共地（README 第九节）。
 
 // ---- 计时和起停 ----
 // 注意：Uno 上 int 最大只有 32767，180000 装不下，毫秒一律用 unsigned long
@@ -105,13 +109,16 @@ int debugOled   = 1;   // 1 = 在 OLED 上显示调试信息（跑完停屏"验�
 // 所以这里读出来基本永远是 0，只能用来看串口，不能当真。真正有用的是下面那个 vccMinMv。
 int resetCause = 0;
 
-// 【诊断用】运行期间见过的最低供电电压（毫伏）。
-// 关键点：它被放在 .noinit 段 —— 复位时 SRAM 不会被清零，所以这个值能【跨过复位】留下来。
-// 车"冲一步就停"之后再回到待机画面，屏幕上会显示它：
-//   显示 2.4~2.8V  ->  复位前 5V 真的被拉塌了，是欠压复位（BOOTNOUT）
-//   显示 4.9~5.4V  ->  电压没塌，那复位就不是供电塌陷引起的
-// 放在 .noinit 是因为普通全局变量在启动时会被清零，值会丢。
+// 【诊断用】运行期间见过的最低供电电压（毫伏），分两个窗口记，都放在 .noinit 段。
+// .noinit 的意思是这个变量【复位时不会被清零】，所以值能跨过一次复位留下来。
+// 车"冲一步就停"之后再回到待机画面，屏幕上就会显示：
+//   vccMinMv  起步瞬间（软起动 + 0.4 秒内）的最低电压   -> 看电机启动冲击有多狠
+//   vccRunMv  踢完之后稳态的最低电压                    -> 看正常跑起来之后供电够不够
+// 比值参考：这个读法比真实值高约 7%（真实 5.0V 会显示成 5.36V）。
+//   显示 2.4~2.9V -> 实际约 2.2~2.7V，已经到 AVR 欠压阈值(2.7V)以下，是欠压复位
+//   显示 4.9~5.4V -> 电压没塌，复位是别的原因
 int vccMinMv __attribute__((section(".noinit")));
+int vccRunMv __attribute__((section(".noinit")));
 
 // [重要] 下面所有字符串都写成 F("...")。AVR 上普通字符串占 RAM，F() 把它放进 Flash。
 // 原因：128x64 的 OLED 需要 malloc 1024 字节显存，UNO 只有 2048 字节 RAM，
@@ -152,9 +159,12 @@ void setup() {
     Serial.println(F("  注意：Uno 的 bootloader 通常会把它清成 0，读不到东西"));
   }
 
-  // vccMinMv 在 .noinit 段，上电时是内存里的随机值。不在合理范围就当成没有记录。
+  // 这两个在 .noinit 段，上电时是内存里的随机值。不在合理范围就当成没有记录。
   if (vccMinMv < 2000 || vccMinMv > 6000) {
     vccMinMv = 6000;
+  }
+  if (vccRunMv < 2000 || vccRunMv > 6000) {
+    vccRunMv = 6000;
   }
 
   oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);   // 0x3C 是屏幕的 I2C 地址
@@ -182,16 +192,19 @@ void loop() {
   oled.setCursor(0, 32);
   oled.print(F("th = "));
   oled.println(threshold);
-  // 上一次【运行期间】见过的最低供电电压。
-  //   2.4~2.8V  -> 复位前 5V 真的塌了，是欠压复位，电机供电必须单独走（README 第九节）
-  //   4.9~5.4V  -> 电压没塌，复位是别的原因
-  // 我这边测的是"毫伏/1000"直接显示；这个读法比真实值高约 7%（5.0V 会显示成 5.36V），
-  // 看相对变化就行，绝对值不用较真。
+  // 上一次【运行期间】见过的最低供电电压：  起步瞬间 / 稳态
+  //   前面那个 2.4~2.9V -> 电机启动把 5V 拉塌了，是欠压复位（实际电压比显示低约 7%）
+  //   后面那个也很低   -> 不是启动冲击的问题，是正常跑起来供电就不够
+  // 显示的是"毫伏/1000"直接换算，比真实值高约 7%（真实 5.0V 会显示成 5.36V），看相对变化。
   oled.setCursor(0, 48);
   oled.print(F("minV "));
   oled.print(vccMinMv / 1000);
   oled.print('.');
   oled.print((vccMinMv % 1000) / 10);
+  oled.print('/');
+  oled.print(vccRunMv / 1000);
+  oled.print('.');
+  oled.print((vccRunMv % 1000) / 10);
   oled.print(F("V"));
   oled.display();
 
@@ -240,14 +253,19 @@ void loop() {
   digitalWrite(ledRun, HIGH);
   digitalWrite(ledStat, HIGH);
 
-  // 起步"踢一脚"突破齿轮静摩擦，再降回正常的循迹速度。
-  // speedKick 原来是 255，实测会把 5V 拉塌导致单片机复位，所以降到 200。
-  vccMinMv = 6000;          // 清掉上一次记录，重新开始测这一趟的最低电压
+  // 软起动：从 0 一档一档升到 speedKick，而不是一步跳上去。
+  // 电机静止时是堵转、电流最大；慢慢升压能让它在"刚好转得起来"的电压上脱离静摩擦，
+  // 那一刻的电流比一步给到 200 小得多，供电才不会被拉塌。
+  vccMinMv = 6000;          // 清掉上一次记录，重新测这一趟
+  vccRunMv = 6000;
   analogWrite(leftBack, 0);
   analogWrite(rightBack, 0);
-  analogWrite(leftForward, speedKick);
-  analogWrite(rightForward, speedKick);
-  delay(startKickMs);
+  for (int s = rampStep; s <= speedKick; s = s + rampStep) {
+    analogWrite(leftForward, s);
+    analogWrite(rightForward, s);
+    delay(rampStepMs);
+  }
+  delay(startKickMs);       // 升到顶之后再保持一下，确保真的转起来了
   analogWrite(leftForward, fastLeft);
   analogWrite(rightForward, speedFast);
 
@@ -285,11 +303,13 @@ void loop() {
       if (rightValue < threshold) rightBlack = 1;
     }
 
-    // ---------- 供电电压监视（只在起步后 2 秒内做）----------
+    // ---------- 供电电压监视（只在起步后 3 秒内做）----------
     // 电机启动的一瞬间电压会塌，塌陷只持续几毫秒，10Hz 采样根本抓不到，
-    // 所以在这段窗口里【每次循环都测】，把最低值记到 vccMinMv。
-    // 这个变量在 .noinit 段，单片机复位后值还在，回到待机画面就能看到。
-    if (millis() - startTime < 2000) {
+    // 所以在这段窗口里【每次循环都测】。分两个窗口记：
+    //   vccMinMv  全程最低（主要是软起动那段）
+    //   vccRunMv  1 秒之后的稳态最低（看正常跑起来供电够不够）
+    // 这两个变量在 .noinit 段，单片机复位后值还在，回到待机画面就能看到。
+    if (millis() - startTime < 3000) {
       // 用 AVR 内部的 1.1V 基准反推 VCC：ADMUX 切到内部基准通道
       ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
       ADCSRA |= _BV(ADSC);                        // 第一次转换丢弃（刚换通道还没稳定）
@@ -300,6 +320,9 @@ void loop() {
       if (raw > 0) {
         int mv = 1125300L / raw;                  // 1125300 = 1.1V × 1023 × 1000
         if (mv < vccMinMv) vccMinMv = mv;
+        if (millis() - startTime > 1000) {
+          if (mv < vccRunMv) vccRunMv = mv;
+        }
       }
     }
 
