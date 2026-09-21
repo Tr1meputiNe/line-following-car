@@ -101,9 +101,17 @@ unsigned long oledMs      = 100;     // 循迹时每隔多久刷新一次屏幕
 int debugLaunch = 1;   // 1 = 开机时把复位原因打到串口
 int debugOled   = 1;   // 1 = 在 OLED 上显示调试信息（跑完停屏"验尸"）
 
-// 上一次复位的原因。在 setup() 里从 MCUSR 读出来，显示在待机画面上。
-// 只要车"自己停了/冲一步就停"，看这一行就知道单片机有没有重启、为什么重启。
+// 上一次复位的原因。注意：Uno 的 bootloader（optiboot）会在跳到程序之前把 MCUSR 清掉，
+// 所以这里读出来基本永远是 0，只能用来看串口，不能当真。真正有用的是下面那个 vccMinMv。
 int resetCause = 0;
+
+// 【诊断用】运行期间见过的最低供电电压（毫伏）。
+// 关键点：它被放在 .noinit 段 —— 复位时 SRAM 不会被清零，所以这个值能【跨过复位】留下来。
+// 车"冲一步就停"之后再回到待机画面，屏幕上会显示它：
+//   显示 2.4~2.8V  ->  复位前 5V 真的被拉塌了，是欠压复位（BOOTNOUT）
+//   显示 4.9~5.4V  ->  电压没塌，那复位就不是供电塌陷引起的
+// 放在 .noinit 是因为普通全局变量在启动时会被清零，值会丢。
+int vccMinMv __attribute__((section(".noinit")));
 
 // [重要] 下面所有字符串都写成 F("...")。AVR 上普通字符串占 RAM，F() 把它放进 Flash。
 // 原因：128x64 的 OLED 需要 malloc 1024 字节显存，UNO 只有 2048 字节 RAM，
@@ -141,7 +149,12 @@ void setup() {
   if (debugLaunch == 1) {
     Serial.print(F("reset cause = 0x"));
     Serial.println(resetCause, HEX);
-    Serial.println(F("  bit0 上电  bit1 复位键  bit2 电压过低  bit3 看门狗"));
+    Serial.println(F("  注意：Uno 的 bootloader 通常会把它清成 0，读不到东西"));
+  }
+
+  // vccMinMv 在 .noinit 段，上电时是内存里的随机值。不在合理范围就当成没有记录。
+  if (vccMinMv < 2000 || vccMinMv > 6000) {
+    vccMinMv = 6000;
   }
 
   oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);   // 0x3C 是屏幕的 I2C 地址
@@ -169,15 +182,17 @@ void loop() {
   oled.setCursor(0, 32);
   oled.print(F("th = "));
   oled.println(threshold);
-  // 上一次复位的原因。车"自己停了"的时候看这一行：
-  //   BROWNOUT = 5V 被拉塌了，电机供电要单独走（见 README 第九节）
+  // 上一次【运行期间】见过的最低供电电压。
+  //   2.4~2.8V  -> 复位前 5V 真的塌了，是欠压复位，电机供电必须单独走（README 第九节）
+  //   4.9~5.4V  -> 电压没塌，复位是别的原因
+  // 我这边测的是"毫伏/1000"直接显示；这个读法比真实值高约 7%（5.0V 会显示成 5.36V），
+  // 看相对变化就行，绝对值不用较真。
   oled.setCursor(0, 48);
-  oled.print(F("boot: "));
-  if ((resetCause & 0x04) != 0)      oled.println(F("BROWNOUT!"));
-  else if ((resetCause & 0x02) != 0) oled.println(F("RESET-BTN"));
-  else if ((resetCause & 0x08) != 0) oled.println(F("WATCHDOG"));
-  else if ((resetCause & 0x01) != 0) oled.println(F("POWER-ON"));
-  else                               oled.println(resetCause);
+  oled.print(F("minV "));
+  oled.print(vccMinMv / 1000);
+  oled.print('.');
+  oled.print((vccMinMv % 1000) / 10);
+  oled.print(F("V"));
   oled.display();
 
   digitalWrite(ledRun, LOW);
@@ -227,6 +242,7 @@ void loop() {
 
   // 起步"踢一脚"突破齿轮静摩擦，再降回正常的循迹速度。
   // speedKick 原来是 255，实测会把 5V 拉塌导致单片机复位，所以降到 200。
+  vccMinMv = 6000;          // 清掉上一次记录，重新开始测这一趟的最低电压
   analogWrite(leftBack, 0);
   analogWrite(rightBack, 0);
   analogWrite(leftForward, speedKick);
@@ -267,6 +283,24 @@ void loop() {
     } else {
       if (leftValue  < threshold) leftBlack  = 1;
       if (rightValue < threshold) rightBlack = 1;
+    }
+
+    // ---------- 供电电压监视（只在起步后 2 秒内做）----------
+    // 电机启动的一瞬间电压会塌，塌陷只持续几毫秒，10Hz 采样根本抓不到，
+    // 所以在这段窗口里【每次循环都测】，把最低值记到 vccMinMv。
+    // 这个变量在 .noinit 段，单片机复位后值还在，回到待机画面就能看到。
+    if (millis() - startTime < 2000) {
+      // 用 AVR 内部的 1.1V 基准反推 VCC：ADMUX 切到内部基准通道
+      ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+      ADCSRA |= _BV(ADSC);                        // 第一次转换丢弃（刚换通道还没稳定）
+      while (bit_is_set(ADCSRA, ADSC)) { }
+      ADCSRA |= _BV(ADSC);
+      while (bit_is_set(ADCSRA, ADSC)) { }
+      int raw = ADC;
+      if (raw > 0) {
+        int mv = 1125300L / raw;                  // 1125300 = 1.1V × 1023 × 1000
+        if (mv < vccMinMv) vccMinMv = mv;
+      }
     }
 
     // ---------- ② 踩到起始线就停车 ----------
