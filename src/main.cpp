@@ -72,8 +72,14 @@ int trimLeft = 0;
 int fastLeft = speedFast + trimLeft;   // 左轮直行速度，自动算出来
 int turnLeft = speedTurn + trimLeft;   // 左轮转弯外侧速度，自动算出来
 
-int startKickMs = 150;   // 起步先满速"踢"多久（毫秒）。起不来就加到 300
-// 直流电机静止时阻力比转动时大得多，直接给循迹速度常常原地不转。
+int speedKick  = 200;    // 起步"踢一脚"的速度。原来写死 255，太猛会把 5V 拉塌
+int startKickMs = 100;   // 踢多久（毫秒）
+// 直流电机静止时阻力比转动时大得多，直接给循迹速度常常原地不转，所以要踢一脚。
+// 【但踢太狠会复位】255 满速踢两个堵转的电机，是全程电流最大的一瞬间；
+//   如果电机电源取自 Arduino 的 5V（USB 供电还有 500mA 保险丝），
+//   这一下会把 5V 拉到 2.7V 以下 -> AVR 欠压复位 -> setup() 把电机清零 -> 车"冲一步就停"。
+//   两种改法：① 把 speedKick 降到 150~180、startKickMs 降到 60~100（软件缓解）
+//             ② 给电机单独供电（根治，见 README 第九节）
 
 // ---- 计时和起停 ----
 // 注意：Uno 上 int 最大只有 32767，180000 装不下，毫秒一律用 unsigned long
@@ -94,6 +100,10 @@ unsigned long oledMs      = 100;     // 循迹时每隔多久刷新一次屏幕
 // ---- 调试开关（都调好之后改成 0）----
 int debugLaunch = 1;   // 1 = 开机时把复位原因打到串口
 int debugOled   = 1;   // 1 = 在 OLED 上显示调试信息（跑完停屏"验尸"）
+
+// 上一次复位的原因。在 setup() 里从 MCUSR 读出来，显示在待机画面上。
+// 只要车"自己停了/冲一步就停"，看这一行就知道单片机有没有重启、为什么重启。
+int resetCause = 0;
 
 // [重要] 下面所有字符串都写成 F("...")。AVR 上普通字符串占 RAM，F() 把它放进 Flash。
 // 原因：128x64 的 OLED 需要 malloc 1024 字节显存，UNO 只有 2048 字节 RAM，
@@ -123,8 +133,10 @@ void setup() {
 
   Serial.begin(9600);
 
-  // MCUSR 是 AVR 记录上一次复位原因的寄存器，用来判断单片机有没有重启过
-  int resetCause = MCUSR;
+  // MCUSR 是 AVR 记录上一次复位原因的寄存器，用来判断单片机有没有重启过。
+  //   bit0 PORF 上电复位   bit1 EXTRF 复位键/外部复位
+  //   bit2 BORF 电压过低   bit3 WDRF 看门狗
+  resetCause = MCUSR;
   MCUSR = 0;                     // 读完清掉，下次开机才是新的原因
   if (debugLaunch == 1) {
     Serial.print(F("reset cause = 0x"));
@@ -154,9 +166,18 @@ void loop() {
   oled.println(F("Line Following Car"));
   oled.println(F(""));
   oled.println(F("Press START"));
-  oled.setCursor(0, 40);
+  oled.setCursor(0, 32);
   oled.print(F("th = "));
   oled.println(threshold);
+  // 上一次复位的原因。车"自己停了"的时候看这一行：
+  //   BROWNOUT = 5V 被拉塌了，电机供电要单独走（见 README 第九节）
+  oled.setCursor(0, 48);
+  oled.print(F("boot: "));
+  if ((resetCause & 0x04) != 0)      oled.println(F("BROWNOUT!"));
+  else if ((resetCause & 0x02) != 0) oled.println(F("RESET-BTN"));
+  else if ((resetCause & 0x08) != 0) oled.println(F("WATCHDOG"));
+  else if ((resetCause & 0x01) != 0) oled.println(F("POWER-ON"));
+  else                               oled.println(resetCause);
   oled.display();
 
   digitalWrite(ledRun, LOW);
@@ -204,11 +225,12 @@ void loop() {
   digitalWrite(ledRun, HIGH);
   digitalWrite(ledStat, HIGH);
 
-  // 起步先给满速 255"踢一脚"突破齿轮静摩擦，再降回正常的循迹速度
+  // 起步"踢一脚"突破齿轮静摩擦，再降回正常的循迹速度。
+  // speedKick 原来是 255，实测会把 5V 拉塌导致单片机复位，所以降到 200。
   analogWrite(leftBack, 0);
   analogWrite(rightBack, 0);
-  analogWrite(leftForward, 255);
-  analogWrite(rightForward, 255);
+  analogWrite(leftForward, speedKick);
+  analogWrite(rightForward, speedKick);
   delay(startKickMs);
   analogWrite(leftForward, fastLeft);
   analogWrite(rightForward, speedFast);
