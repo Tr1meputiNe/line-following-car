@@ -59,9 +59,9 @@ int blackHigh = 1;      // 【已实测】黑线读数大 -> 填 1。若压黑�
 // 以后要调就继续"在前后两次之间取中位数"，每试一次区间减半，几次就收敛。
 // 【提醒】占空比越大，电机电流越大。实测占空比 130 时 5V 轨被拉到 2.30V；
 //   这次比那时还高 10，如果一跑就复位，先把 speedFast 降回来。
-int speedFast = 140;    // 直行速度（两个轮子一样）
-int speedTurn = 165;    // 转弯时【外侧】轮速度，越大转得越急
-int speedBack = 110;    // 转弯时【内侧】轮【反转】速度，越大转得越急
+int speedFast = 130;    // 直行速度（两个轮子一样）
+int speedTurn = 155;    // 转弯时【外侧】轮速度，越大转得越急
+int speedBack = 20;    // 转弯时【内侧】轮【反转】速度，越大转得越急
 // 外侧轮往前冲 + 内侧轮往后倒，车身几乎是原地转，这是双轮差速能做出最狠的转向。
 // 【注意】换向（正转↔反转）是电流冲击最大的动作：电机要穿过零点、重新克服静摩擦，
 //   那一瞬间的堵转电流是平时的好几倍，会让供电电压瞬间塌下去。
@@ -96,9 +96,9 @@ unsigned long startLineWindowMs = 150;  // 两个传感器在这段时间内都�
 // 【怎么调】正常过线时两个传感器几乎同时压到，时间差只有几毫秒（传感器条装歪了也就几十毫秒），
 //   所以这个窗口不用大。它的作用只是"别把两次相隔很久的单边压线凑成一次判圈"。
 //   跑完一圈停不下来 -> 加大（250、350）；弯道中途误停 -> 减小（100、80）。
-unsigned long lapMinMs     = 5000;  // 起跑后至少跑这么久才允许停车（防止刚出发就被误判）
-unsigned long lapMaxMs     = 180000;// 3 分钟限时，超时就停车
-unsigned long launchMaxMs  = 5000;  // 出发后最多找 5 秒起始线，找不到就停下（防止小车乱跑）
+unsigned long lockoutMs    = 300;  // 数到一条黑线后先锁这么久，防止同一条线被反复数到
+unsigned long lapMinMs     = 5000;  // 第 1 条黑线之后至少跑这么久，第 2 条黑线才算"跑完一圈"
+unsigned long lapMaxMs     = 180000;// 3 分钟限时，超时就停车（从起步那一刻算起）
 
 // [重要] 下面所有字符串都写成 F("...")。AVR 上普通字符串占 RAM，F() 把它放进 Flash。
 // 原因：128x64 的 OLED 需要 malloc 1024 字节显存，UNO 只有 2048 字节 RAM，
@@ -206,8 +206,13 @@ void loop() {
   }
 
   // -----------------------------------------------------------------
-  // 第三步：发车，直行直到压到起始线（这一段不计时）
+  // 第三步：起步，然后【立刻开始循迹】（不再有"发车阶段"）
   // -----------------------------------------------------------------
+  // 旧写法是先盲冲，等两个传感器【同时】压到起始线才进入循迹。
+  // 那要求起始线比传感器间距还宽、车横向只能偏 2~3mm，实际很难满足；
+  // 结果是车一直进不了循迹，盲冲 5 秒后停住（屏幕一直停在 GO !）。
+  // 现在起步就直接循迹，"黑线"只用来数数：
+  //   第 1 次数到 -> 开始计时；第 2 次数到 -> 跑完一圈，停车。
   oled.clearDisplay();
   oled.setTextSize(2);
   oled.setCursor(24, 24);
@@ -230,61 +235,17 @@ void loop() {
   analogWrite(leftForward, fastLeft);
   analogWrite(rightForward, speedFast);
 
-  unsigned long launchStart = millis();   // 记下发车时刻，用来做超时保护
-  int launchFailed = 0;                   // 0 = 正常找到起始线，1 = 超时没找到
-  unsigned long dbgTime = 0;              // 调试输出用的计时
-
-  // while (true) 就是"一直循环"，直到里面遇到 break 才跳出来
-  while (true) {
-    int leftValue  = analogRead(leftSensorPin);   // analogRead 读回 0~1023 的数字
-    int rightValue = analogRead(rightSensorPin);
-
-    // 比较结果会变成 0（否）或 1（是）；黑白极性用 blackHigh 调整
-    int leftBlack = leftValue > threshold;
-    int rightBlack = rightValue > threshold;
-    if (blackHigh == 0) {
-      leftBlack = leftValue < threshold;
-      rightBlack = rightValue < threshold;
-    }
-
-    // ---- 调试输出：每 100 毫秒打一行，看发车阶段到底读到了什么 ----
-    if (debugLaunch == 1 && millis() - dbgTime > 100) {
-      dbgTime = millis();
-      Serial.print(millis() - launchStart);
-      Serial.print(F("ms  L="));
-      Serial.print(leftValue);
-      Serial.print(F(" R="));
-      Serial.print(rightValue);
-      Serial.print(F("  black="));
-      Serial.print(leftBlack);
-      Serial.print(' ');
-      Serial.println(rightBlack);
-    }
-
-    // 发车阶段是直线冲向起始线，除了起始线不会有别的黑线，看到双黑就是它。
-    // 这里【不能】再 delay 确认：车快的时候 150 毫秒已经冲过整条线了，
-    // 再检查一次反而读到白底，结果永远找不到起始线 -> 5 秒超时停车。
-    if (leftBlack == 1 && rightBlack == 1 && millis() - launchStart > 200) {
-      break;
-    }
-
-    // 超过 launchMaxMs 还没找到起始线，判定发车失败
-    if (millis() - launchStart > launchMaxMs) {
-      launchFailed = 1;
-      break;
-    }
-  }
-
-  if (launchFailed == 1) {
-    Serial.println(F("LAUNCH FAILED: 没看到双黑，检查起始线和发车位置"));
-  }
+  unsigned long runStart = millis();    // 起步时刻，用来做 3 分钟超时保护
 
   // -----------------------------------------------------------------
-  // 第四步：循迹跑一圈
+  // 第四步：循迹跑一圈，数黑线
   // -----------------------------------------------------------------
-  unsigned long startTime = millis();   // ★ 计时从压到起始线的这一刻开始
+  unsigned long startTime = 0;      // ★ 0 = 还没压到第一条黑线，计时还没开始
 
-  int finished   = 0;            // 1 = 正常跑完一圈，0 = 超时 / 发车失败
+  int finished   = 0;            // 1 = 正常跑完一圈，0 = 超时
+  int lineCount  = 0;            // 已经数到几条黑线：0 = 还没压到，1 = 已开始计时
+  int armed      = 1;            // 1 = 可以数下一条；0 = 刚数过，锁定中
+  unsigned long lockTime = 0;    // 上一次数到黑线的时刻，用来做锁定
   unsigned long oledTime     = 0;   // 上一次刷新屏幕的时刻
   unsigned long leftBlackTime  = 0; // 左边最近一次压到黑线的时刻
   unsigned long rightBlackTime = 0; // 右边最近一次压到黑线的时刻
@@ -294,117 +255,137 @@ void loop() {
   int second      = 0;
   int hundredth   = 0;
 
-  if (launchFailed == 0) {
-    while (true) {
-      // ---------- ① 读传感器，判断黑白 ----------
-      int leftValue  = analogRead(leftSensorPin);
-      int rightValue = analogRead(rightSensorPin);
+  while (true) {
+    // ---------- ① 读传感器，判断黑白 ----------
+    int leftValue  = analogRead(leftSensorPin);
+    int rightValue = analogRead(rightSensorPin);
 
-      int leftBlack  = 0;      // 1 = 这个传感器压到黑线了
-      int rightBlack = 0;
-      if (blackHigh == 1) {
-        if (leftValue  > threshold) leftBlack  = 1;
-        if (rightValue > threshold) rightBlack = 1;
+    int leftBlack  = 0;      // 1 = 这个传感器压到黑线了
+    int rightBlack = 0;
+    if (blackHigh == 1) {
+      if (leftValue  > threshold) leftBlack  = 1;
+      if (rightValue > threshold) rightBlack = 1;
+    } else {
+      if (leftValue  < threshold) leftBlack  = 1;
+      if (rightValue < threshold) rightBlack = 1;
+    }
+
+    // ---------- ② 数黑线：第 1 次开始计时，第 2 次停车 ----------
+    // 判一条黑线的办法：两个传感器在 startLineWindowMs 毫秒内【都】压到过黑线。
+    // 起始线横跨赛道，正常过线时两个传感器几乎同时压到，时间差只有几毫秒。
+    //
+    // 【为什么不能在"两个都白"的时候清空计时】
+    // 起始线只有 1.5~2cm 很薄。如果两个传感器前后差一点点，就会出现
+    // "左边已经过了黑线、右边还没压上"的短暂【双白】。要是在双白时把计时清零，
+    // 这条线就直接漏掉了 —— 薄线最常见的就是这个坑。
+    // 所以这里只记录"每一边最后一次压到黑线的时刻"，靠两者的差值判断是不是同一条线。
+    if (leftBlack == 1)  leftBlackTime  = millis();
+    if (rightBlack == 1) rightBlackTime = millis();
+
+    // armed：数到一条之后锁定 lockoutMs，防止同一条线在连续几轮循环里被反复数到
+    if (armed == 0 && millis() - lockTime > lockoutMs) {
+      armed = 1;
+    }
+
+    if (armed == 1 && leftBlackTime != 0 && rightBlackTime != 0) {
+      unsigned long gap = 0;                     // 两次压线的时间差
+      if (leftBlackTime > rightBlackTime) {
+        gap = leftBlackTime - rightBlackTime;
       } else {
-        if (leftValue  < threshold) leftBlack  = 1;
-        if (rightValue < threshold) rightBlack = 1;
+        gap = rightBlackTime - leftBlackTime;
       }
-
-      // ---------- ② 判圈 ----------
-      // 只要某一边压到黑线，就把那一边的"最后压线时刻"更新成现在。
-      if (leftBlack == 1)  leftBlackTime  = millis();
-      if (rightBlack == 1) rightBlackTime = millis();
-
-      // 两个传感器在 startLineWindowMs 毫秒内【都】压到过黑线 -> 判定为横穿起始线。
-      // 起始线横跨赛道，正常过线时两个传感器几乎同时压到，时间差只有几毫秒；
-      // 这里【不要求】双黑持续多久，就是为了兼容 1.5~2cm 这种很薄的起始线。
-      // （旧代码要求双黑连续保持 80ms，薄线压线时间只有 60~80ms，常常够不到。）
-      if (leftBlackTime != 0 && rightBlackTime != 0) {
-        unsigned long gap = 0;                     // 两次压线的时间差
-        if (leftBlackTime > rightBlackTime) {
-          gap = leftBlackTime - rightBlackTime;
-        } else {
-          gap = rightBlackTime - leftBlackTime;
+      if (gap < startLineWindowMs) {
+        armed     = 0;                           // 锁上
+        lockTime  = millis();
+        leftBlackTime  = 0;                      // 清掉，下一条线要重新压到才算
+        rightBlackTime = 0;
+        if (lineCount == 0) {
+          lineCount = 1;
+          startTime = millis();                  // ★ 第 1 条黑线：开始计时
         }
-        if (gap < startLineWindowMs && millis() - startTime > lapMinMs) {
-          finished = 1;
+        else if (millis() - startTime > lapMinMs) {
+          finished = 1;                          // ★ 第 2 条黑线：跑完一圈，停车
           break;
         }
       }
+    }
 
-      // ---------- ③ 决定 4 个脚各给多少 ----------
-      // 先按"直行"把 4 个值都填好，下面只在需要转弯时改动其中几个。
-      // 这样就不用每个分支都写一遍，也不会漏掉某个脚。
-      int leftGo   = fastLeft;    // 左轮 前进值
-      int leftRev  = 0;           // 左轮 反转值
-      int rightGo  = speedFast;   // 右轮 前进值
-      int rightRev = 0;           // 右轮 反转值
+    // ---------- ③ 决定 4 个脚各给多少 ----------
+    // 先按"直行"把 4 个值都填好，下面只在需要转弯时改动其中几个。
+    // 这样就不用每个分支都写一遍，也不会漏掉某个脚。
+    int leftGo   = fastLeft;    // 左轮 前进值
+    int leftRev  = 0;           // 左轮 反转值
+    int rightGo  = speedFast;   // 右轮 前进值
+    int rightRev = 0;           // 右轮 反转值
 
-      if (leftBlack == 1 && rightBlack == 0) {
-        // 只有左边压到黑线 -> 线在车的左边 -> 车偏右 -> 向左转。
-        // 左轮当"内侧"往后倒，右轮当"外侧"往前冲，车身几乎是原地转。
-        leftGo   = 0;
-        leftRev  = speedBack;
-        rightGo  = speedTurn;
+    if (leftBlack == 1 && rightBlack == 0) {
+      // 只有左边压到黑线 -> 线在车的左边 -> 车偏右 -> 向左转。
+      // 左轮当"内侧"往后倒，右轮当"外侧"往前冲，车身几乎是原地转。
+      leftGo   = 0;
+      leftRev  = speedBack;
+      rightGo  = speedTurn;
+    }
+    else if (leftBlack == 0 && rightBlack == 1) {
+      // 只有右边压到黑线 -> 线在车的右边 -> 车偏左 -> 向右转。
+      leftGo   = turnLeft;
+      rightGo  = 0;
+      rightRev = speedBack;
+    }
+    // 剩下两种情况都是直行，直接用上面填好的默认值：
+    //   两个都白 = 车正正压在线上（本车是"夹住线"的摆法）
+    //   两个都黑 = 起始线
+
+    // ---------- ④ 一次性把 4 个脚写出去 ----------
+    // 只在这一处写，就不会出现"某个脚忘了写、残留上一次的反转"
+    analogWrite(leftForward,  leftGo);
+    analogWrite(leftBack,     leftRev);
+    analogWrite(rightForward, rightGo);
+    analogWrite(rightBack,    rightRev);
+
+    // ---- 3 分钟超时保护 ----
+    if (millis() - runStart > lapMaxMs) {
+      finished = 0;
+      break;
+    }
+
+    // ---- 每 100 毫秒刷新一次屏幕 ----
+    if (millis() - oledTime > oledMs) {
+      oledTime = millis();
+
+      passed = 0;                            // 还没压到第一条黑线时显示 00:00.00
+      if (startTime != 0) {
+        passed = millis() - startTime;       // 已经过去多少毫秒
       }
-      else if (leftBlack == 0 && rightBlack == 1) {
-        // 只有右边压到黑线 -> 线在车的右边 -> 车偏左 -> 向右转。
-        leftGo   = turnLeft;
-        rightGo  = 0;
-        rightRev = speedBack;
-      }
-      // 剩下两种情况都是直行，直接用上面填好的默认值：
-      //   两个都白 = 车正正压在线上（本车是"夹住线"的摆法）
-      //   两个都黑 = 起始线
+      totalSecond = passed / 1000;          // 换算成整秒
+      minute      = totalSecond / 60;       // 分钟
+      second      = totalSecond % 60;       // 秒（% 是取余数）
+      hundredth   = (passed % 1000) / 10;   // 百分秒
 
-      // ---------- ④ 一次性把 4 个脚写出去 ----------
-      // 只在这一处写，就不会出现"某个脚忘了写、残留上一次的反转"
-      analogWrite(leftForward,  leftGo);
-      analogWrite(leftBack,     leftRev);
-      analogWrite(rightForward, rightGo);
-      analogWrite(rightBack,    rightRev);
+      oled.clearDisplay();
+      oled.setTextSize(1);
+      oled.setCursor(0, 0);
+      oled.print(F("Running  L"));
+      oled.println(lineCount);
 
-      // ---- 3 分钟超时保护 ----
-      if (millis() - startTime > lapMaxMs) {
-        finished = 0;
-        break;
-      }
+      // 大号字显示  分:秒.百分秒
+      oled.setTextSize(2);
+      oled.setCursor(0, 20);
+      if (minute < 10) oled.print(F("0"));     // 补 0，让数字宽度固定，看着不跳
+      oled.print(minute);
+      oled.print(F(":"));
+      if (second < 10) oled.print(F("0"));
+      oled.print(second);
+      oled.print(F("."));
+      if (hundredth < 10) oled.print(F("0"));
+      oled.print(hundredth);
 
-      // ---- 每 100 毫秒刷新一次屏幕 ----
-      if (millis() - oledTime > oledMs) {
-        oledTime = millis();
+      // 画 3 分钟进度条
+      int bar = (int)((millis() - startTime) * 100 / lapMaxMs);
+      if (bar > 100) bar = 100;
+      oled.drawRect(0, 54, 104, 10, SSD1306_WHITE);   // 先画外面的方框
+      oled.fillRect(2, 56, bar, 6, SSD1306_WHITE);    // 再用实心块表示进度
 
-        passed      = millis() - startTime;   // 已经过去多少毫秒
-        totalSecond = passed / 1000;          // 换算成整秒
-        minute      = totalSecond / 60;       // 分钟
-        second      = totalSecond % 60;       // 秒（% 是取余数）
-        hundredth   = (passed % 1000) / 10;   // 百分秒
-
-        oled.clearDisplay();
-        oled.setTextSize(1);
-        oled.setCursor(0, 0);
-        oled.println(F("Running"));
-
-        // 大号字显示  分:秒.百分秒
-        oled.setTextSize(2);
-        oled.setCursor(0, 20);
-        if (minute < 10) oled.print(F("0"));     // 补 0，让数字宽度固定，看着不跳
-        oled.print(minute);
-        oled.print(F(":"));
-        if (second < 10) oled.print(F("0"));
-        oled.print(second);
-        oled.print(F("."));
-        if (hundredth < 10) oled.print(F("0"));
-        oled.print(hundredth);
-
-        // 画 3 分钟进度条
-        int bar = (int)((millis() - startTime) * 100 / lapMaxMs);
-        if (bar > 100) bar = 100;
-        oled.drawRect(0, 54, 104, 10, SSD1306_WHITE);   // 先画外面的方框
-        oled.fillRect(2, 56, bar, 6, SSD1306_WHITE);    // 再用实心块表示进度
-
-        oled.display();
-      }
+      oled.display();
     }
   }
 
@@ -418,7 +399,10 @@ void loop() {
   digitalWrite(ledRun, LOW);
   digitalWrite(ledStat, LOW);
 
-  passed      = millis() - startTime;
+  passed = 0;
+  if (startTime != 0) {
+    passed = millis() - startTime;
+  }
   totalSecond = passed / 1000;
   minute      = totalSecond / 60;
   second      = totalSecond % 60;
