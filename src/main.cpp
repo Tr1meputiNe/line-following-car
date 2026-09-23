@@ -30,22 +30,23 @@
 #include <Adafruit_SSD1306.h>
 
 // ============================== 引脚 ==============================
-// 【实测】扩展板丝印标的左右和实际是反的，下表按实测写死，和丝印不一致是正常的。
+// 【新接口定义】下面这一套是重新接线后实测确认的，和旧版（D5/D6/D9/D10 + 按键 D7 + 蜂鸣器 D4）不同。
 // 左右以"人站在车后、车头朝前"为准。
 // 验证方法：烧 bringup，敲 q（让左轮变慢）看哪个物理轮子慢；
 //           敲 r，手指挡车的左侧传感器，看哪一列数字变。
-int leftSensorPin  = A0;
-int rightSensorPin = A1;
+int leftSensorPin  = A0;   // 左传感器 OUT
+int rightSensorPin = A1;   // 右传感器 OUT
 
-// MX1508：实测 MOTOR-B(D9/D10) 驱动左轮，MOTOR-A(D5/D6) 驱动右轮
-// 哪一轮方向反了，就交换该轮 Forward / Back 的两个引脚号
-int leftForward  = 9;
-int leftBack     = 10;
-int rightForward = 5;
-int rightBack    = 6;
+// MX1508：IN1/IN2 控制 MOTOR-A，IN3/IN4 控制 MOTOR-B。
+// 新接线实测：MOTOR-A → 左轮，MOTOR-B → 右轮。
+// 哪一轮【方向反了】，就交换该轮 Forward / Back 这两个引脚号（不要改接线）。
+int leftForward  = 6;    // IN1
+int leftBack     = 7;    // IN2
+int rightForward = 8;    // IN3
+int rightBack    = 9;    // IN4
 
-int buzzer      = 4;    // 扩展板 BUZ（用 bringup 的 z 命令扫出来的）
-int startButton = 7;    // S1，板上有外部下拉电阻：松开 LOW，按下 HIGH
+int buzzer      = 10;   // 扩展板 BUZ（只有一个 buz 脚，新接在 D10）
+int startButton = 2;    // S1，板上有外部下拉电阻：松开 LOW，按下 HIGH
 int ledRun      = 11;   // LED2
 int ledStat     = 12;   // LED1
 

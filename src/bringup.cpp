@@ -30,24 +30,24 @@
 #include <Adafruit_SSD1306.h>
 
 // ---------------------------- 引脚（和主程序一致） ----------------------------
-// 【实测结论】扩展板丝印标的左右和实际是反的，这里按实测写死，和丝印不一致是正常的。
+// 【新接口定义】重新接线后实测确认，和旧版（D5/D6/D9/D10 + 按键 D7 + 蜂鸣器 D4）不同。
 // 实测方法：bringup 敲 q（代码让"左轮"变慢），看哪个物理轮子慢；
 //           敲 r，手指挡车的左侧传感器，看哪一列数字变。
 // 左右以"人站在车后、车头朝前"为准。
-int leftSensorPin  = A0;   // 实测：车左侧的传感器接在 A0
-int rightSensorPin = A1;   // 实测：车右侧的传感器接在 A1
+int leftSensorPin  = A0;   // 车左侧的传感器 OUT
+int rightSensorPin = A1;   // 车右侧的传感器 OUT
 
-// MX1508：换了驱动模块之后实测，MOTOR-B(D9/D10) 驱动左轮，MOTOR-A(D5/D6) 驱动右轮
-// 某轮前进方向不对，就在两个程序里交换该轮 Forward/Back 的引脚值
-// 换了新的驱动板之后这张映射要重新用 bringup 的 q 命令验一遍
-int leftForward  = 9;
-int leftBack     = 10;
-int rightForward = 5;
-int rightBack    = 6;
+// MX1508：IN1/IN2 控制 MOTOR-A，IN3/IN4 控制 MOTOR-B。
+// 新接线实测：MOTOR-A → 左轮，MOTOR-B → 右轮。
+// 某轮方向反了，就在两个程序里交换该轮 Forward/Back 的引脚值（不要改接线）
+int leftForward  = 6;    // IN1
+int leftBack     = 7;    // IN2
+int rightForward = 8;    // IN3
+int rightBack    = 9;    // IN4
 
 // 扩展板 S1 有外部下拉电阻，松开为 LOW，按下为 HIGH
-int buzzer      = 4;    // 扩展板 BUZ 实测接在 D4（用 z 命令扫描出来的）
-int startButton = 7;
+int buzzer      = 10;   // 扩展板只有一个 buz 脚，新接在 D10
+int startButton = 2;    // S1 新接在 D2
 int ledRun      = 11;   // LED2
 int ledStat     = 12;   // LED1；S2 未连接
 
@@ -450,9 +450,9 @@ void loop() {
       // 【蜂鸣器引脚扫描】挨个引脚输出方波，用耳朵听出蜂鸣器到底接在哪个脚
       // 不用 tone()，改成手动翻转电平，这样任何数字脚都能试
       // 注意：D0/D1 是串口，绝对不能碰，所以从 D2 开始
-      Serial.println(F("--- buzzer pin sweep ---"));
+      Serial.println(F("--- buzzer pin sweep (D2 跳过: 启动键) ---"));
       Serial.println(F("each pin beeps ~0.3s, listen carefully"));
-      Serial.println(F("D5 D6 D9 D10 will twitch the motors - raise the car!"));
+      Serial.println(F("D6 D7 D8 D9 will twitch the motors - raise the car!"));
       for (int pin = 2; pin <= 13; pin = pin + 1) {
         // 【必须跳过 D7】D7 是启动键，按键另一端接的是 HIGH。
         // 把 D7 推成输出再驱动 LOW，一按按键就等于把 HIGH 直接短到地，
