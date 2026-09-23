@@ -144,6 +144,7 @@ void setup() {
   Serial.println(F("m=forward n=back s=stop q=left w=right"));
   Serial.println(F("l=100 h=220 o=oled t=beep+led r=sensor b=button"));
   Serial.println(F("f=follow z=sweep v=VCC test x=fwd/rev stress"));
+  Serial.println(F("y=duty sweep (找电压撑得住的最高占空比)"));
   Serial.println(F("r 打印 20 组左 A0、右 A1 读数，用它找阈值"));
 }
 
@@ -397,6 +398,53 @@ void loop() {
       analogWrite(rightForward, 0);
       analogWrite(rightBack, 0);
       Serial.println(F("motors OFF"));
+    }
+    else if (c == 'y') {
+      // 【占空比扫描】找出"5V 还撑得住"的最高占空比
+      // 这一步是为了解决"电机接在 Arduino 5V 上 -> 500mA 保险丝限流 -> 单片机复位"。
+      // 电机电流基本和占空比成正比，所以只要找到电压开始往下掉的那一档，
+      // 主程序的 speedFast 取它的 60% 左右（这里轮子悬空，比实际跑轻，要留余量）。
+      // 把车架空（轮子离地）再按 y，两个电机从 20 一档一档加到 255。
+      Serial.println(F("=== duty sweep (raise the car!) ==="));
+      Serial.println(F("duty   VCCmin(mV)   VM(A2)(mV)"));
+      analogWrite(leftBack, 0);
+      analogWrite(rightBack, 0);
+      for (int duty = 20; duty <= 255; duty = duty + 15) {
+        analogWrite(leftForward, duty);
+        analogWrite(rightForward, duty);
+
+        // 这一档停 1.5 秒，每秒测 50 次，记下最低的那个电压
+        int vmin = 30000;                     // 注意不能用 99999，Uno 上 int 最大 32767
+        unsigned long t0 = millis();
+        while (millis() - t0 < 1500) {
+          ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+          delay(2);
+          ADCSRA |= _BV(ADSC);
+          while (ADCSRA & _BV(ADSC)) { }
+          long raw = ADCL;
+          raw |= ADCH << 8;
+          if (raw > 0) {
+            int v = (int)(1125300L / raw);
+            if (v < vmin) vmin = v;
+          }
+          delay(18);
+        }
+
+        // 顺便量一下 MX1508 的 VM（要从 VM 接一根线到 A2）
+        analogRead(A2);
+        int vmRaw = analogRead(A2);
+        int vm = (int)((long)vmRaw * vmin / 1023);
+
+        Serial.print(duty);
+        Serial.print(F("     "));
+        Serial.print(vmin);
+        Serial.print(F("       "));
+        Serial.println(vm);
+      }
+      analogWrite(leftForward, 0);
+      analogWrite(rightForward, 0);
+      Serial.println(F("=== sweep done, motors OFF ==="));
+      Serial.println(F("电压从哪一档开始掉，speedFast 就取那一档的 60%"));
     }
     else if (c == 'z') {
       // 【蜂鸣器引脚扫描】挨个引脚输出方波，用耳朵听出蜂鸣器到底接在哪个脚
