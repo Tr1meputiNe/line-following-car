@@ -15,7 +15,7 @@
  *      s = 停车
  *      o = 屏幕测试（画字和一个方块）
  *      t = 蜂鸣器响 + 两个灯一起闪
- *      r = 打印 20 组传感器读数（左 A1、右 A0）
+ *      r = 打印 20 组传感器读数（左 A0、右 A1）
  *      b = 打印启动键 S1 的状态（按下为 1）
  *      f = 循迹测试模式
  *      v = 电机压力测试 + 自动电压监控（不用万用表）
@@ -55,12 +55,15 @@ int ledStat     = 12;   // LED1；S2 未连接
 // AVR 上普通字符串会占用宝贵的 RAM，F() 把它存到 Flash 里，不占 RAM。
 // 原因：128x64 的 OLED 需要 1024 字节显存，而 UNO 只有 2048 字节 RAM。
 //       字符串占太多 RAM 会导致 oled.begin() 里的 malloc 失败，屏幕一片黑。
-int speedNow = 130;    // 当前速度
+// 【这几个数必须和 src/main.cpp 完全一致】循迹测试模式调出来的值是要直接抄进主程序的，
+// 两边不一样的话，这里调着好用、搬过去表现却不同，白调。
+// src/main.cpp 当前值：speedFast=85  speedTurn=90  speedBack=30  startKickMs=100
+int speedNow = 85;     // 当前速度（对应主程序的 speedFast）
 int trimLeft = 0;      // 左轮补偿，和 src/main.cpp 保持一致（往左偏填正数）
-int speedTurn = 135;   // 转弯时外侧轮速度，和 src/main.cpp 保持一致
-int speedBack = 60;    // 转弯时内侧轮反转速度，和 src/main.cpp 保持一致
+int speedTurn = 90;    // 转弯时外侧轮速度，和 src/main.cpp 保持一致
+int speedBack = 30;    // 转弯时内侧轮反转速度，和 src/main.cpp 保持一致
 int followMode = 0;    // 1 = 循迹测试模式开着
-int startKickMs = 150; // 起步踢一脚的时长（毫秒），和 src/main.cpp 保持一致
+int startKickMs = 100; // 起步踢一脚的时长（毫秒），和 src/main.cpp 保持一致
 
 // 下面两个只是给 r 命令做"黑/白"显示用的，要和 src/main.cpp 里保持一致
 int threshold = 840;   // 黑白分界值
@@ -141,7 +144,7 @@ void setup() {
   Serial.println(F("m=forward n=back s=stop q=left w=right"));
   Serial.println(F("l=100 h=220 o=oled t=beep+led r=sensor b=button"));
   Serial.println(F("f=follow z=sweep v=VCC test x=fwd/rev stress"));
-  Serial.println(F("r 打印 20 组左 A1、右 A0 读数，用它找阈值"));
+  Serial.println(F("r 打印 20 组左 A0、右 A1 读数，用它找阈值"));
 }
 
 void loop() {
@@ -258,8 +261,12 @@ void loop() {
         Serial.println(F("follow mode ON  (press f again to stop)"));
       } else {
         followMode = 0;
+        // 【四个脚都要清】只清前进脚不够：如果按 f 时正好在转弯，内侧轮的反转值
+        // 还留在 leftBack / rightBack 上，那个轮子会一直倒转不停。
         analogWrite(leftForward, 0);
+        analogWrite(leftBack, 0);
         analogWrite(rightForward, 0);
+        analogWrite(rightBack, 0);
         Serial.println(F("follow mode OFF"));
       }
     }
@@ -270,7 +277,7 @@ void loop() {
       // 按任意键停止。
       Serial.println(F("=== motor stress + VCC monitor ==="));
       Serial.println(F("(A2 接一根线到 MX1508 的 VM 就能同时看 VM 电压)"));
-      Serial.println(F("motors ON. press any key to stop"));
+      Serial.println(F("motors ON. press any key to stop (30s 自动停)"));
 
       analogWrite(leftBack, 0);
       analogWrite(rightBack, 0);
@@ -282,7 +289,7 @@ void loop() {
 
       unsigned long t0 = millis();
       unsigned long last = 0;
-      while (Serial.available() == 0) {
+      while (Serial.available() == 0 && millis() - t0 < 30000) {
         if (millis() - last > 200) {
           last = millis();
 
@@ -323,14 +330,14 @@ void loop() {
       // 车可以放在地上（会原地前后晃），也可以架起来。按任意键停止。
       Serial.println(F("=== forward/reverse stress + VCC monitor ==="));
       Serial.println(F("(A2 接一根线到 MX1508 的 VM 就能同时看 VM 电压)"));
-      Serial.println(F("switching direction every 2s. press any key to stop"));
+      Serial.println(F("switching direction every 2s. press any key to stop (30s 自动停)"));
 
       unsigned long t0 = millis();
       unsigned long last = 0;
       unsigned long flip = 0;
       int forward = 1;
 
-      while (Serial.available() == 0) {
+      while (Serial.available() == 0 && millis() - t0 < 30000) {
         if (millis() - last > 200) {
           last = millis();
 
@@ -399,24 +406,29 @@ void loop() {
       Serial.println(F("each pin beeps ~0.3s, listen carefully"));
       Serial.println(F("D5 D6 D9 D10 will twitch the motors - raise the car!"));
       for (int pin = 2; pin <= 13; pin = pin + 1) {
-        pinMode(pin, OUTPUT);
-        Serial.print(F("  testing D"));
-        Serial.println(pin);
-        // delayMicroseconds(250) = 等 250 微秒。一高一低是一个周期，约 2kHz
-        for (int i = 0; i < 600; i = i + 1) {
-          digitalWrite(pin, HIGH);
-          delayMicroseconds(250);
-          digitalWrite(pin, LOW);
-          delayMicroseconds(250);
+        // 【必须跳过 D7】D7 是启动键，按键另一端接的是 HIGH。
+        // 把 D7 推成输出再驱动 LOW，一按按键就等于把 HIGH 直接短到地，
+        // 而且扫完之后 D7 会一直留在"输出 LOW"状态，一直有这个风险。
+        if (pin != startButton) {
+          pinMode(pin, OUTPUT);
+          Serial.print(F("  testing D"));
+          Serial.println(pin);
+          // delayMicroseconds(250) = 等 250 微秒。一高一低是一个周期，约 2kHz
+          for (int i = 0; i < 600; i = i + 1) {
+            digitalWrite(pin, HIGH);
+            delayMicroseconds(250);
+            digitalWrite(pin, LOW);
+            delayMicroseconds(250);
+          }
+          delay(300);   // 停一下，方便分辨是哪个脚在响
         }
-        delay(300);   // 停一下，方便分辨是哪个脚在响
       }
       Serial.println(F("--- sweep done. which D pin beeped? ---"));
       Serial.println(F("if none beeped -> buzzer 没接好或坏了"));
     }
     else if (c == 'r') {
       // 打印 20 组读数，并且按 threshold / blackHigh 标出 B(黑线) 或 W(白底)
-      Serial.println(F("--- left(A1) right(A0) ---"));
+      Serial.println(F("--- left(A0) right(A1) ---"));
       Serial.println(F("--- B=black line  W=white ---"));
       for (int i = 0; i < 20; i = i + 1) {
         int lv = analogRead(leftSensorPin);
