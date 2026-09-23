@@ -74,10 +74,19 @@ int debugLaunch = 1;    // 1 = 发车阶段把传感器读数打到串口（调�
 
 // ---- 计时和起停相关 ----
 // 注意：Uno 上 int 最大只能到 32767，180000 装不下，所以这几个要用 unsigned long
-unsigned long startLineMs  = 80;    // 两个传感器同时压黑线超过这么久，才算"起始线"
-// 【怎么定的】你的起始线只有 3cm 宽，车压过整条线的时间 = 3cm / 车速。
-// 车速 130 时约 20~25cm/s，压线 120~150ms，取 80ms 留余量。
-// 车速越慢压线时间越长、余量越大；跑完一圈停不下来 -> 降到 60；弯道提前停车 -> 加到 110
+//
+// 【判圈为什么要用"时间窗"而不是"同时压黑"】
+// 两个传感器是"夹住黑线"的摆法，它们的间距 d 通常【比起始线的宽度 W 还大】。
+// 要让两个传感器【同时】压到同一条黑带，必须满足：
+//      W > d，而且车横向偏移 |e| < W/2 - d
+//   例：起始线 3cm、传感器间距 25mm(d=12.5) -> 横向只能偏 ±2.5mm，基本踩不中；
+//       间距 30mm 以上 -> 永远不可能。表现就是"跑完一圈停不下来"。
+// 所以改成：两个传感器在 startLineWindowMs 毫秒内【都压到过】黑线就算数，
+// 不管先后、也不管中间有没有间断 —— 车横穿起始线本来就是"先左后右"依次压到的。
+unsigned long startLineWindowMs = 250;  // 两个传感器在这段时间内都压到过黑线就算回到起始线
+// 【怎么调】压线时间 = 线宽 ÷ 车速，两个传感器先后压到的间隔 = 传感器间距 ÷ 车速。
+//   跑完一圈停不下来 -> 加大（300、400）；弯道中途误停 -> 减小（180、120）。
+//   车速 20~25cm/s、间距 25mm 时，先后间隔约 100~125ms，250ms 有足够余量。
 unsigned long lapMinMs     = 5000;  // 起跑后至少跑这么久才允许停车（防止刚出发就被误判）
 unsigned long lapMaxMs     = 180000;// 3 分钟限时，超时就停车
 unsigned long launchMaxMs  = 5000;  // 出发后最多找 5 秒起始线，找不到就停下（防止小车乱跑）
@@ -268,7 +277,8 @@ void loop() {
 
   int finished   = 0;            // 1 = 正常跑完一圈，0 = 超时 / 发车失败
   unsigned long oledTime     = 0;   // 上一次刷新屏幕的时刻
-  unsigned long bothBlackTime = 0;  // 两个传感器"同时开始压黑线"的时刻
+  unsigned long leftBlackTime  = 0; // 左边最近一次压到黑线的时刻
+  unsigned long rightBlackTime = 0; // 右边最近一次压到黑线的时刻
   unsigned long passed    = 0;      // 已经过去的毫秒数
   int totalSecond = 0;
   int minute      = 0;
@@ -292,19 +302,23 @@ void loop() {
       }
 
       // ---------- ② 判圈 ----------
-      // 单独拿出来判，不和电机控制混在一起。
-      // 条件：两个传感器同时压黑线，持续超过 startLineMs，
-      //       而且已经跑了超过 lapMinMs（防止刚出发就被误判）
-      if (leftBlack == 1 && rightBlack == 1) {
-        if (bothBlackTime == 0) {
-          bothBlackTime = millis();   // 刚刚同时压上，记下时刻
+      // 只要某一边压到黑线，就把那一边的"最后压线时刻"更新成现在。
+      if (leftBlack == 1)  leftBlackTime  = millis();
+      if (rightBlack == 1) rightBlackTime = millis();
+
+      // 两个传感器在 startLineWindowMs 毫秒内【都】压到过黑线 -> 判定为横穿起始线。
+      // 不要求同时，也不要求中间不断线：车横穿起始线时是先左后右依次压到的。
+      if (leftBlackTime != 0 && rightBlackTime != 0) {
+        unsigned long gap = 0;                     // 两次压线的时间差
+        if (leftBlackTime > rightBlackTime) {
+          gap = leftBlackTime - rightBlackTime;
+        } else {
+          gap = rightBlackTime - leftBlackTime;
         }
-        if (millis() - bothBlackTime > startLineMs && millis() - startTime > lapMinMs) {
+        if (gap < startLineWindowMs && millis() - startTime > lapMinMs) {
           finished = 1;
           break;
         }
-      } else {
-        bothBlackTime = 0;            // 只要不是双黑，就重新计时
       }
 
       // ---------- ③ 决定 4 个脚各给多少 ----------
