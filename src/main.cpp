@@ -1,27 +1,18 @@
+
 /* =====================================================================
- *  光电循迹小车  ——  主程序
+ *  光电循迹小车  ——  主程序（单文件版）
  *
  *  硬件：Arduino UNO + MX1508 电机驱动 + 2 路光电对管 + 0.96" OLED(SSD1306)
  *
  *  运行流程：
- *     上电        -> OLED 显示 "Press START"，停在这里等按键
- *     按启动键    -> 倒计时 3-2-1
- *     起步        -> 满速踢一脚，然后【立刻开始循迹】，计时也从这一刻开始
- *     循迹        -> 沿黑线跑一圈
- *     压到起始线  -> 两个传感器同时压黑线并保持一会儿 -> 停车，显示成绩
+ *    1. 上电后 OLED 显示 "Press START"，程序停在这里等按键
+ *    2. 按下启动键 -> OLED 倒计时 3-2-1
+ *    3. 小车直行开出出发区，压到起始线的那一刻开始计时
+ *    4. 沿着黑线循迹前进，OLED 上实时刷新用时
+ *    5. 再次压到起始线 -> 停车 -> OLED 显示最终成绩
  *
- *  要改接线：只改"引脚"那一段
- *  要调参数：只改"参数"那一段
- *
- *  【为什么不设"发车阶段"】
- *  以前的写法是：先盲冲，等两个传感器【同时】压到起始线才进入循迹。
- *  但两个传感器同时压到同一条黑带，要求黑带比两个传感器的间距还宽，
- *  而且车横向只能偏 2~3 毫米 —— 实际几乎不可能满足。
- *  结果是车永远进不了循迹，一直盲冲 5 秒后停住，看起来就是"压到线也不拐"。
- *  现在改成起步就直接循迹，"双黑"只用来当停车信号。
- *
- *  两个传感器是"夹住黑线"的摆法：车正的时候黑线从两个传感器中间穿过，
- *  两个都读到白底；哪一边读到黑线，就说明线偏到哪一边，往那一边转。
+ *  要改接线：只改下面"引脚"那一段
+ *  要调参数：只改下面"参数"那一段
  * ===================================================================== */
 
 #include <Arduino.h>
@@ -30,14 +21,15 @@
 #include <Adafruit_SSD1306.h>
 
 // ============================== 引脚 ==============================
-// 【新接口定义】下面这一套是重新接线后实测确认的，和旧版（D5/D6/D9/D10 + 按键 D7 + 蜂鸣器 D4）不同。
-// 左右以"人站在车后、车头朝前"为准。
-// 验证方法：烧 bringup，敲 q（让左轮变慢）看哪个物理轮子慢；
+// 光电对管的模拟输出接 A0 / A1
+// 【实测结论】扩展板丝印标的左右和实际是反的，这里按实测写死，和丝印不一致是正常的。
+// 实测方法：bringup 敲 q（代码让"左轮"变慢），看哪个物理轮子慢；
 //           敲 r，手指挡车的左侧传感器，看哪一列数字变。
+// 左右以"人站在车后、车头朝前"为准。
 int leftSensorPin  = A0;   // 左传感器 OUT
 int rightSensorPin = A1;   // 右传感器 OUT
 
-// MX1508：IN1/IN2 控制 MOTOR-A，IN3/IN4 控制 MOTOR-B。
+// MX1508：IN1/IN2 控制 MOTOR-A，IN3/IN4 控制 MOTOR-B
 // 新接线实测：MOTOR-A → 左轮，MOTOR-B → 右轮。
 // 哪一轮【方向反了】，就交换该轮 Forward / Back 这两个引脚号（不要改接线）。
 int leftForward  = 6;    // IN1
@@ -45,109 +37,60 @@ int leftBack     = 7;    // IN2
 int rightForward = 8;    // IN3
 int rightBack    = 9;    // IN4
 
-int buzzer      = 10;   // 扩展板 BUZ（只有一个 buz 脚，新接在 D10）
-int startButton = 2;    // S1，板上有外部下拉电阻：松开 LOW，按下 HIGH
+// 扩展板 S1 有外部下拉电阻，松开为 LOW，按下为 HIGH
+int buzzer      = 10;   // 扩展板只有一个 buz 脚，新接在 D10
+int startButton = 2;    // S1 新接在 D2
 int ledRun      = 11;   // LED2
-int ledStat     = 12;   // LED1
+int ledStat     = 12;   // LED1；S2 未连接
 
 // ============================== 参数 ==============================
-// ---- 黑白判断 ----
-// 【实测】黑线读数 915~949，白底读数 705~762，取中间值 840。
-// 余量：黑线最低 915 比 840 高 75，白底最高 762 比 840 低 78。
+// ---- 按你的赛道情况调这几个数字 ----
+// 黑白分界值。【已实测】黑线读数 915~949，白底读数 705~762，取中间值 840
+// 余量：黑线最低 915 比 840 高 75；白底最高 762 比 840 低 78
 int threshold = 840;
-int blackHigh = 1;       // 黑线读数大填 1；若压黑线读到小数字，改成 0
+int blackHigh = 1;      // 【已实测】黑线读数大 -> 填 1。若压黑线读到小数字，改成 0
+int speedFast = 130;    // 直行速度（两个轮子一样）
+int speedTurn = 155;    // 转弯时【外侧】轮速度，越大转得越急
+int speedBack = 100;    // 转弯时【内侧】轮【反转】速度，越大转得越急
+// 外侧轮往前冲 + 内侧轮往后倒，车身几乎是原地转，这是双轮差速能做出最狠的转向。
+// 【注意】换向（正转↔反转）是电流冲击最大的动作：电机要穿过零点、重新克服静摩擦，
+//   那一瞬间的堵转电流是平时的好几倍，会让供电电压瞬间塌下去。
+//   如果你的供电是 USB（Uno 上有 500mA 保险丝），转向时可能会中途停住。
+//   真出现这种情况，把 speedBack 改成 0：内侧轮会变成"停住"（MX1508 两个输入
+//   都是 0 = 刹车），电流冲击小了，但转向力度也会明显变弱。
+//   根治办法是给电机单独的电池供电，见 README。
 
-// ---- 速度（0~255，就是 PWM 占空比）----
-// 【当前：动力输出全部拉到最大 255，按用户要求】
-// 背景提醒（实测过，留着备查）：电机电源取自 Arduino 的 5V 引脚，那颗自恢复保险丝的
-// "保持电流"是 500mA。总电流超过它，保险丝就发热、阻值暴涨，5V 轨塌到 2.2V（实测），
-// 单片机欠压复位。实测记录：占空比 200 -> 起步最低 2.85V；占空比 130 -> 稳态 2.30V。
-// 所以【占空比越小越不容易复位】；现在拉满是为了先确认"电机本身没问题、车能走"，
-// 确认之后如果一跑就复位，再一格一格往下调（每档 10），找到不塌的最高值。
-//
-// 想知道分界在哪：烧 bringup，车架空，敲 y 跑"占空比扫描"，
-// 它从 20 一档一档加到 255，每档打印见到的最低电压；哪一档电压开始崩就是分界。
-int speedFast = 255;     // 直行速度（两个轮子一样）
-int speedTurn = 255;     // 转弯时【外侧】轮速度
-int speedBack = 255;     // 转弯时【内侧】轮【反转】速度；改成 0 = 内侧轮只停住不倒转，最省电
-// 外侧轮往前冲 + 内侧轮往后倒，车身几乎是原地转，这是双轮差速能做出来最狠的转向。
-// 两个数越大转得越急，也越容易冲过头来回摆；车在直线上画龙就把它们往小调。
-
-// ---- 左右轮补偿 ----
-// 车往左偏 = 左轮偏慢 -> trimLeft 填正数（先试 5、10、15）
-// 车往右偏 = 右轮偏慢 -> trimLeft 填负数（先试 -5、-10、-15）
-// 【注意】D5/D6 走 Timer0（约 976Hz），D9/D10 走 Timer1（约 490Hz），
-//         左右轮 PWM 频率天生不同，同一占空比下转速不一样，所以这个补偿要认真调。
+// 左右轮补偿。车往左偏 = 左轮偏慢 -> trimLeft 填正数（先试 5、10、15）
+//              车往右偏 = 右轮偏慢 -> trimLeft 填负数（先试 -5、-10、-15）
+// 建议范围 -30 ~ +30，别太大
 int trimLeft = 0;
-int fastLeft = speedFast + trimLeft;   // 左轮直行速度，自动算出来
-int turnLeft = speedTurn + trimLeft;   // 左轮转弯外侧速度，自动算出来
+int fastLeft = speedFast + trimLeft;   // 左轮直行速度，自动算出来，不用手改
+int turnLeft = speedTurn + trimLeft;   // 左轮转弯外侧速度，自动算出来，不用手改
+int startKickMs = 150;  // 起步时先给满速"踢"多久（毫秒）。还起不来就加到 400
+// 循迹时每隔多久刷新一次 OLED（毫秒）。刷一次屏要往 I2C 发 1024 字节，约 23 毫秒，
+// 这期间电机收不到新指令。数值越大，屏幕刷新越慢，但这段"控制盲区"越小。
+unsigned long oledMs = 100;
+int debugLaunch = 1;    // 1 = 发车阶段把传感器读数打到串口（调好后改回 0）
 
-int speedKick  = 255;    // 软起动升到的最高速度
-int startKickMs = 100;   // 升到顶之后再保持多久（毫秒）
-int rampStep   = 5;      // 每档加多少
-int rampStepMs = 20;     // 每档停多少毫秒
-// 直流电机静止时是堵转，电流最大。一步跳到高占空比会把 5V 拉到 AVR 的欠压阈值
-// （2.7V）以下 -> 复位 -> setup() 把电机清零 -> 车"冲一步就停"。
-// 【实测】一步跳到 200 时起步最低电压 2.85V，跳到 130 时稳态 2.30V（读法偏高约 7%）。
-// 所以改成"软起动"：5、10、15…… 一档一档加上去，每档 20ms。
-// 电机在"刚好转得起来"的那个占空比上脱离静摩擦，那一刻的电流比一步跳上去小得多。
-// 【注意】speedKick 是软起动的峰值，它本身也受保险丝限制，所以从 200 降到 120。
-//   如果降到车起不动了，说明保险丝允许的峰值已经低于"能转起来"的门槛 —— 软件无解。
-//
-// 如果软起动之后还是复位，就说明供电彻底不够了，只能改硬件：
-//   电机电源单独走电池盒 -> MX1508 的 VM，Arduino 单独走 USB，两边共地（README 第九节）。
-
-// ---- 计时和起停 ----
-// 注意：Uno 上 int 最大只有 32767，180000 装不下，毫秒一律用 unsigned long
-unsigned long startLineMs = 80;      // 双黑连续保持这么久，才算"压到起始线"
-unsigned long lapMinMs    = 5000;    // 起步后至少跑这么久才允许停车
-unsigned long lapMaxMs    = 180000;  // 3 分钟限时
-unsigned long oledMs      = 100;     // 循迹时每隔多久刷新一次屏幕
-
-// lapMinMs 是防止"刚起步就误停"的保险：
-//   车摆在起始线【前面】时，起步一两秒就会压过一次起始线，
-//   没有这个保险就会立刻停住。跑了这么久之后就都算数了。
-//   如果你的车是摆在【起始线后面】的引导线上，可以降到 2000。
-//
-// startLineMs 和起始线宽度直接相关：起始线 3cm、车速约 20~25cm/s，
-//   压线 120~150ms，所以取 80ms 留余量。
-//   跑完一圈停不下来 -> 降到 60；弯道提前停车 -> 加到 110。
-
-// ---- 调试开关（都调好之后改成 0）----
-int debugLaunch = 1;   // 1 = 开机时把复位原因打到串口
-int debugOled   = 1;   // 1 = 在 OLED 上显示调试信息（跑完停屏"验尸"）
-
-// 上一次复位的原因。注意：Uno 的 bootloader（optiboot）会在跳到程序之前把 MCUSR 清掉，
-// 所以这里读出来基本永远是 0，只能用来看串口，不能当真。真正有用的是下面那个 vccMinMv。
-int resetCause = 0;
-
-// 【诊断用】运行期间见过的最低供电电压（毫伏），分两个窗口记，都放在 .noinit 段。
-// .noinit 的意思是这个变量【复位时不会被清零】，所以值能跨过一次复位留下来。
-// 车"冲一步就停"之后再回到待机画面，屏幕上就会显示：
-//   vccMinMv  起步瞬间（软起动 + 0.4 秒内）的最低电压   -> 看电机启动冲击有多狠
-//   vccRunMv  踢完之后稳态的最低电压                    -> 看正常跑起来之后供电够不够
-// 比值参考：这个读法比真实值高约 7%（真实 5.0V 会显示成 5.36V）。
-//   显示 2.4~2.9V -> 实际约 2.2~2.7V，已经到 AVR 欠压阈值(2.7V)以下，是欠压复位
-//   显示 4.9~5.4V -> 电压没塌，复位是别的原因
-int vccMinMv __attribute__((section(".noinit")));
-int vccRunMv __attribute__((section(".noinit")));
+// ---- 计时和起停相关 ----
+// 注意：Uno 上 int 最大只能到 32767，180000 装不下，所以这几个要用 unsigned long
+unsigned long startLineMs  = 80;    // 两个传感器同时压黑线超过这么久，才算"起始线"
+// 【怎么定的】你的起始线只有 3cm 宽，车压过整条线的时间 = 3cm / 车速。
+// 车速 130 时约 20~25cm/s，压线 120~150ms，取 80ms 留余量。
+// 车速越慢压线时间越长、余量越大；跑完一圈停不下来 -> 降到 60；弯道提前停车 -> 加到 110
+unsigned long lapMinMs     = 5000;  // 起跑后至少跑这么久才允许停车（防止刚出发就被误判）
+unsigned long lapMaxMs     = 180000;// 3 分钟限时，超时就停车
+unsigned long launchMaxMs  = 5000;  // 出发后最多找 5 秒起始线，找不到就停下（防止小车乱跑）
 
 // [重要] 下面所有字符串都写成 F("...")。AVR 上普通字符串占 RAM，F() 把它放进 Flash。
 // 原因：128x64 的 OLED 需要 malloc 1024 字节显存，UNO 只有 2048 字节 RAM，
-//       字符串占多了 malloc 就会失败，屏幕一片黑，而编译器不会报任何警告。
+//       字符串占多了 malloc 就会失败，屏幕一片黑（编译器不会报任何警告）。
+// OLED 屏幕对象。用这个库的时候必须这样写一行
 Adafruit_SSD1306 oled(128, 64, &Wire, -1);
 
 // ============================== setup ==============================
 void setup() {
-  // 【必须做的一步】占空比最大只能到 255。fastLeft / turnLeft 是 speedFast / speedTurn
-  // 加上 trimLeft 算出来的；speedFast 已经是 255 时，只要 trimLeft 填了正数，
-  // 算出来就会超过 255。而 analogWrite 最后写的是 8 位定时器寄存器，260 会被【截断成 4】
-  // —— 那个轮子几乎不转，而且编译器一句警告都不会给，非常难查。
-  if (fastLeft > 255) fastLeft = 255;
-  if (fastLeft < 0)   fastLeft = 0;
-  if (turnLeft > 255) turnLeft = 255;
-  if (turnLeft < 0)   turnLeft = 0;
-
+  // 传感器是模拟输出，设成输入
   pinMode(leftSensorPin, INPUT);
   pinMode(rightSensorPin, INPUT);
 
@@ -161,36 +104,28 @@ void setup() {
   pinMode(ledStat, OUTPUT);
   pinMode(buzzer, OUTPUT);
 
-  // 初始化屏幕之前先确保两个电机都停住
+  // 初始化屏幕之前，先确保两个电机都停止
   analogWrite(leftForward, 0);
   analogWrite(leftBack, 0);
   analogWrite(rightForward, 0);
   analogWrite(rightBack, 0);
 
-  Serial.begin(9600);
+  Serial.begin(9600);         // 串口，用来在监视器里看数据
 
-  // MCUSR 是 AVR 记录上一次复位原因的寄存器，用来判断单片机有没有重启过。
-  //   bit0 PORF 上电复位   bit1 EXTRF 复位键/外部复位
-  //   bit2 BORF 电压过低   bit3 WDRF 看门狗
-  resetCause = MCUSR;
-  MCUSR = 0;                     // 读完清掉，下次开机才是新的原因
+  // ---- 报告"复位原因"：用来判断单片机是不是重启过 ----
+  // MCUSR 是 AVR 记录上次复位原因的一个寄存器
+  int resetCause = MCUSR;
+  MCUSR = 0;                  // 读完清掉，下次开机才是新的原因
   if (debugLaunch == 1) {
     Serial.print(F("reset cause = 0x"));
     Serial.println(resetCause, HEX);
-    Serial.println(F("  注意：Uno 的 bootloader 通常会把它清成 0，读不到东西"));
+    Serial.println(F("  bit0 PORF=上电  bit1 EXTRF=复位键  bit2 BORF=电压掉太低  bit3 WDRF=看门狗"));
   }
 
-  // 这两个在 .noinit 段，上电时是内存里的随机值。不在合理范围就当成没有记录。
-  if (vccMinMv < 2000 || vccMinMv > 6000) {
-    vccMinMv = 6000;
-  }
-  if (vccRunMv < 2000 || vccRunMv > 6000) {
-    vccRunMv = 6000;
-  }
-
-  oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);   // 0x3C 是屏幕的 I2C 地址
+  // 初始化 OLED。SSD1306_SWITCHCAPVCC 是库规定的写法，0x3C 是屏幕的 I2C 地址
+  oled.begin(SSD1306_SWITCHCAPVCC, 0x3C);
   oled.clearDisplay();
-  oled.setTextColor(SSD1306_WHITE);         // SSD1306_WHITE 就是"点亮这个点"
+  oled.setTextColor(SSD1306_WHITE);   // SSD1306_WHITE 就是"点亮这个点"
   oled.setTextSize(1);
   oled.setCursor(0, 0);
   oled.println(F("Line Car Ready"));
@@ -201,70 +136,60 @@ void setup() {
 
 // ============================== loop ==============================
 void loop() {
-  // =================================================================
-  // 第 1 步  待机，等启动键按下
-  // =================================================================
+  // -----------------------------------------------------------------
+  // 第一步：显示待机画面，等启动键按下
+  // -----------------------------------------------------------------
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setCursor(0, 0);
   oled.println(F("Line Following Car"));
   oled.println(F(""));
   oled.println(F("Press START"));
-  oled.setCursor(0, 32);
+  oled.setCursor(0, 40);
   oled.print(F("th = "));
   oled.println(threshold);
-  // 上一次【运行期间】见过的最低供电电压：  起步瞬间 / 稳态
-  //   前面那个 2.4~2.9V -> 电机启动把 5V 拉塌了，是欠压复位（实际电压比显示低约 7%）
-  //   后面那个也很低   -> 不是启动冲击的问题，是正常跑起来供电就不够
-  // 显示的是"毫伏/1000"直接换算，比真实值高约 7%（真实 5.0V 会显示成 5.36V），看相对变化。
-  oled.setCursor(0, 48);
-  oled.print(F("minV "));
-  oled.print(vccMinMv / 1000);
-  oled.print('.');
-  oled.print((vccMinMv % 1000) / 10);
-  oled.print('/');
-  oled.print(vccRunMv / 1000);
-  oled.print('.');
-  oled.print((vccRunMv % 1000) / 10);
-  oled.print(F("V"));
   oled.display();
 
   digitalWrite(ledRun, LOW);
   digitalWrite(ledStat, LOW);
 
-  while (digitalRead(startButton) == LOW) {   // 停在这里，直到读到 HIGH（按下）
+  // 一直在这里循环，直到读到 HIGH（也就是按键被按下）
+  while (digitalRead(startButton) == LOW) {
     delay(10);
   }
-  delay(30);                                  // 简易消抖：30ms 后再确认一次
+  // 简易消抖：等 30 毫秒再确认一次，还是 HIGH 才算真的按下
+  delay(30);
   if (digitalRead(startButton) == LOW) {
-    return;                                   // 刚才是抖动，回开头重新等
+    return;   // 刚才只是抖动，回到 loop 开头重新等
   }
-  while (digitalRead(startButton) == HIGH) {  // 等手指松开，免得一次按压算两次
+  // 等手指松开，避免一次按压被当成两次
+  while (digitalRead(startButton) == HIGH) {
     delay(10);
   }
 
-  // =================================================================
-  // 第 2 步  倒计时 3-2-1
-  // =================================================================
+  // -----------------------------------------------------------------
+  // 第二步：倒计时 3 秒
+  // -----------------------------------------------------------------
+  // for 循环：i 从 3 数到 1，每轮减 1
   for (int i = 3; i >= 1; i = i - 1) {
     oled.clearDisplay();
     oled.setTextSize(1);
     oled.setCursor(0, 0);
     oled.println(F("Ready..."));
-    oled.setTextSize(4);
+    oled.setTextSize(4);            // 换成大号字
     oled.setCursor(50, 24);
     oled.print(i);
     oled.display();
 
-    tone(buzzer, 900);    // 倒计时短响
+    tone(buzzer, 900);   // 倒计时短响
     delay(150);
     noTone(buzzer);
     delay(850);
   }
 
-  // =================================================================
-  // 第 3 步  起步，然后立刻开始循迹
-  // =================================================================
+  // -----------------------------------------------------------------
+  // 第三步：发车，直行直到压到起始线（这一段不计时）
+  // -----------------------------------------------------------------
   oled.clearDisplay();
   oled.setTextSize(2);
   oled.setCursor(24, 24);
@@ -274,189 +199,193 @@ void loop() {
   digitalWrite(ledRun, HIGH);
   digitalWrite(ledStat, HIGH);
 
-  // 软起动：从 0 一档一档升到 speedKick，而不是一步跳上去。
-  // 电机静止时是堵转、电流最大；慢慢升压能让它在"刚好转得起来"的电压上脱离静摩擦，
-  // 那一刻的电流比一步给到 200 小得多，供电才不会被拉塌。
-  vccMinMv = 6000;          // 清掉上一次记录，重新测这一趟
-  vccRunMv = 6000;
+  // MX1508：反向输入保持 LOW，在前进输入上用 PWM 调速（0~255）
   analogWrite(leftBack, 0);
   analogWrite(rightBack, 0);
-  for (int s = rampStep; s <= speedKick; s = s + rampStep) {
-    analogWrite(leftForward, s);
-    analogWrite(rightForward, s);
-    delay(rampStepMs);
-  }
-  delay(startKickMs);       // 升到顶之后再保持一下，确保真的转起来了
+  // 起步"踢一脚"：先给满速 255 突破齿轮的静摩擦
+  // 直流电机静止时阻力比转动时大得多，直接给 speedFast 常常原地不转
+  analogWrite(leftForward, 255);
+  analogWrite(rightForward, 255);
+  delay(startKickMs);
+
+  // 再降回正常的循迹速度
   analogWrite(leftForward, fastLeft);
   analogWrite(rightForward, speedFast);
 
-  unsigned long startTime = millis();   // ★ 计时从起步这一刻开始
+  unsigned long launchStart = millis();   // 记下发车时刻，用来做超时保护
+  int launchFailed = 0;                   // 0 = 正常找到起始线，1 = 超时没找到
+  unsigned long dbgTime = 0;              // 调试输出用的计时
 
-  // =================================================================
-  // 第 4 步  循迹跑一圈，第一次压到起始线就停车
-  // =================================================================
-  int finished = 0;                     // 1 = 正常跑完一圈
-  unsigned long oledTime      = 0;      // 上一次刷新屏幕的时刻
-  unsigned long bothBlackTime = 0;      // 两个传感器"同时开始压黑线"的时刻
-
-  // 调试统计：每刷新一次屏幕采样一次（10 次/秒），跑完显示在屏幕上验尸
-  int cntWW = 0;    // 两个都白的次数
-  int cntLB = 0;    // 左黑的次数
-  int cntRB = 0;    // 右黑的次数
-  int cntBB = 0;    // 双黑的次数
-  int minL = 1023;  // 左传感器读到过的最小读数
-  int maxL = 0;     // 左传感器读到过的最大读数
-  int minR = 1023;  // 右传感器读到过的最小读数
-  int maxR = 0;     // 右传感器读到过的最大读数
-
+  // while (true) 就是"一直循环"，直到里面遇到 break 才跳出来
   while (true) {
-    // ---------- ① 读传感器，判断黑白 ----------
-    int leftValue  = analogRead(leftSensorPin);
+    int leftValue  = analogRead(leftSensorPin);   // analogRead 读回 0~1023 的数字
     int rightValue = analogRead(rightSensorPin);
 
-    int leftBlack  = 0;
-    int rightBlack = 0;
-    if (blackHigh == 1) {
-      if (leftValue  > threshold) leftBlack  = 1;
-      if (rightValue > threshold) rightBlack = 1;
-    } else {
-      if (leftValue  < threshold) leftBlack  = 1;
-      if (rightValue < threshold) rightBlack = 1;
+    // 比较结果会变成 0（否）或 1（是）；黑白极性用 blackHigh 调整
+    int leftBlack = leftValue > threshold;
+    int rightBlack = rightValue > threshold;
+    if (blackHigh == 0) {
+      leftBlack = leftValue < threshold;
+      rightBlack = rightValue < threshold;
     }
 
-    // ---------- 供电电压监视（只在起步后 3 秒内做）----------
-    // 电机启动的一瞬间电压会塌，塌陷只持续几毫秒，10Hz 采样根本抓不到，
-    // 所以在这段窗口里【每次循环都测】。分两个窗口记：
-    //   vccMinMv  全程最低（主要是软起动那段）
-    //   vccRunMv  1 秒之后的稳态最低（看正常跑起来供电够不够）
-    // 这两个变量在 .noinit 段，单片机复位后值还在，回到待机画面就能看到。
-    if (millis() - startTime < 3000) {
-      // 用 AVR 内部的 1.1V 基准反推 VCC：ADMUX 切到内部基准通道
-      ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
-      ADCSRA |= _BV(ADSC);                        // 第一次转换丢弃（刚换通道还没稳定）
-      while (bit_is_set(ADCSRA, ADSC)) { }
-      ADCSRA |= _BV(ADSC);
-      while (bit_is_set(ADCSRA, ADSC)) { }
-      int raw = ADC;
-      if (raw > 0) {
-        int mv = 1125300L / raw;                  // 1125300 = 1.1V × 1023 × 1000
-        if (mv < vccMinMv) vccMinMv = mv;
-        if (millis() - startTime > 1000) {
-          if (mv < vccRunMv) vccRunMv = mv;
-        }
-      }
+    // ---- 调试输出：每 100 毫秒打一行，看发车阶段到底读到了什么 ----
+    if (debugLaunch == 1 && millis() - dbgTime > 100) {
+      dbgTime = millis();
+      Serial.print(millis() - launchStart);
+      Serial.print(F("ms  L="));
+      Serial.print(leftValue);
+      Serial.print(F(" R="));
+      Serial.print(rightValue);
+      Serial.print(F("  black="));
+      Serial.print(leftBlack);
+      Serial.print(' ');
+      Serial.println(rightBlack);
     }
 
-    // ---------- ② 踩到起始线就停车 ----------
-    // 两个传感器同时压黑线，并连续保持 startLineMs，同时已经跑够 lapMinMs，
-    // 才算"回到起始线"。
-    if (leftBlack == 1 && rightBlack == 1) {
-      if (bothBlackTime == 0) {
-        bothBlackTime = millis();     // 刚刚同时压上，记下时刻
-      }
-      if (millis() - bothBlackTime > startLineMs && millis() - startTime > lapMinMs) {
-        finished = 1;
-        break;
-      }
-    } else {
-      bothBlackTime = 0;              // 只要不是双黑，就重新计时
-    }
-
-    // ---------- ③ 转向 ----------
-    // 哪一边读到黑线，线就在哪一边，就往哪一边转。
-    if (leftBlack == 1 && rightBlack == 0) {
-      // 线在左边 -> 向左转：左轮倒转、右轮往前冲
-      analogWrite(leftForward, 0);
-      analogWrite(leftBack, speedBack);
-      analogWrite(rightForward, speedTurn);
-      analogWrite(rightBack, 0);
-    }
-    else if (leftBlack == 0 && rightBlack == 1) {
-      // 线在右边 -> 向右转：右轮倒转、左轮往前冲
-      analogWrite(leftForward, turnLeft);
-      analogWrite(leftBack, 0);
-      analogWrite(rightForward, 0);
-      analogWrite(rightBack, speedBack);
-    }
-    else {
-      // 两个都白 = 车正；两个都黑 = 起始线。两种都直行。
-      analogWrite(leftForward, fastLeft);
-      analogWrite(leftBack, 0);
-      analogWrite(rightForward, speedFast);
-      analogWrite(rightBack, 0);
-    }
-
-    // ---------- ④ 3 分钟超时保护 ----------
-    if (millis() - startTime > lapMaxMs) {
-      finished = 0;
+    // 发车阶段是直线冲向起始线，除了起始线不会有别的黑线，看到双黑就是它。
+    // 这里【不能】再 delay 确认：车快的时候 150 毫秒已经冲过整条线了，
+    // 再检查一次反而读到白底，结果永远找不到起始线 -> 5 秒超时停车。
+    if (leftBlack == 1 && rightBlack == 1 && millis() - launchStart > 200) {
       break;
     }
 
-    // ---------- ⑤ 每 oledMs 刷新一次屏幕 ----------
-    if (millis() - oledTime > oledMs) {
-      oledTime = millis();
-
-      unsigned long passed = millis() - startTime;
-      int totalSecond = passed / 1000;
-      int minute      = totalSecond / 60;
-      int second      = totalSecond % 60;      // % 是取余数
-      int hundredth   = (passed % 1000) / 10;
-
-      // 顺便采样一次，给跑完之后的"验尸"用
-      if (leftBlack == 1 && rightBlack == 1) cntBB = cntBB + 1;
-      else if (leftBlack == 1)               cntLB = cntLB + 1;
-      else if (rightBlack == 1)              cntRB = cntRB + 1;
-      else                                   cntWW = cntWW + 1;
-      if (leftValue  < minL) minL = leftValue;
-      if (leftValue  > maxL) maxL = leftValue;
-      if (rightValue < minR) minR = rightValue;
-      if (rightValue > maxR) maxR = rightValue;
-
-      oled.clearDisplay();
-      oled.setTextSize(1);
-      oled.setCursor(0, 0);
-      oled.println(F("Running"));
-
-      // 大号字显示 分:秒.百分秒
-      oled.setTextSize(2);
-      oled.setCursor(0, 20);
-      if (minute < 10) oled.print(F("0"));     // 补 0，让数字宽度固定，看着不跳
-      oled.print(minute);
-      oled.print(F(":"));
-      if (second < 10) oled.print(F("0"));
-      oled.print(second);
-      oled.print(F("."));
-      if (hundredth < 10) oled.print(F("0"));
-      oled.print(hundredth);
-
-      // 3 分钟进度条
-      int bar = (int)((millis() - startTime) * 100 / lapMaxMs);
-      if (bar > 100) bar = 100;
-      oled.drawRect(0, 54, 104, 10, SSD1306_WHITE);   // 先画外面的方框
-      oled.fillRect(2, 56, bar, 6, SSD1306_WHITE);    // 再用实心块表示进度
-
-      // 调试行：实时显示两个传感器的读数和当前判断
-      if (debugOled == 1) {
-        oled.setTextSize(1);
-        oled.setCursor(0, 42);
-        oled.print(F("L="));
-        oled.print(leftValue);
-        oled.print(F(" R="));
-        oled.print(rightValue);
-        oled.print(' ');
-        if (leftBlack == 1 && rightBlack == 1) oled.print(F("BB"));
-        else if (leftBlack == 1)               oled.print(F("LB"));
-        else if (rightBlack == 1)              oled.print(F("RB"));
-        else                                   oled.print(F("WW"));
-      }
-
-      oled.display();
+    // 超过 launchMaxMs 还没找到起始线，判定发车失败
+    if (millis() - launchStart > launchMaxMs) {
+      launchFailed = 1;
+      break;
     }
   }
 
-  // =================================================================
-  // 第 5 步  停车，显示成绩
-  // =================================================================
+  if (launchFailed == 1) {
+    Serial.println(F("LAUNCH FAILED: 没看到双黑，检查起始线和发车位置"));
+  }
+
+  // -----------------------------------------------------------------
+  // 第四步：循迹跑一圈
+  // -----------------------------------------------------------------
+  unsigned long startTime = millis();   // ★ 计时从压到起始线的这一刻开始
+
+  int finished   = 0;            // 1 = 正常跑完一圈，0 = 超时 / 发车失败
+  unsigned long oledTime     = 0;   // 上一次刷新屏幕的时刻
+  unsigned long bothBlackTime = 0;  // 两个传感器"同时开始压黑线"的时刻
+  unsigned long passed    = 0;      // 已经过去的毫秒数
+  int totalSecond = 0;
+  int minute      = 0;
+  int second      = 0;
+  int hundredth   = 0;
+
+  if (launchFailed == 0) {
+    while (true) {
+      // ---------- ① 读传感器，判断黑白 ----------
+      int leftValue  = analogRead(leftSensorPin);
+      int rightValue = analogRead(rightSensorPin);
+
+      int leftBlack  = 0;      // 1 = 这个传感器压到黑线了
+      int rightBlack = 0;
+      if (blackHigh == 1) {
+        if (leftValue  > threshold) leftBlack  = 1;
+        if (rightValue > threshold) rightBlack = 1;
+      } else {
+        if (leftValue  < threshold) leftBlack  = 1;
+        if (rightValue < threshold) rightBlack = 1;
+      }
+
+      // ---------- ② 判圈 ----------
+      // 单独拿出来判，不和电机控制混在一起。
+      // 条件：两个传感器同时压黑线，持续超过 startLineMs，
+      //       而且已经跑了超过 lapMinMs（防止刚出发就被误判）
+      if (leftBlack == 1 && rightBlack == 1) {
+        if (bothBlackTime == 0) {
+          bothBlackTime = millis();   // 刚刚同时压上，记下时刻
+        }
+        if (millis() - bothBlackTime > startLineMs && millis() - startTime > lapMinMs) {
+          finished = 1;
+          break;
+        }
+      } else {
+        bothBlackTime = 0;            // 只要不是双黑，就重新计时
+      }
+
+      // ---------- ③ 决定 4 个脚各给多少 ----------
+      // 先按"直行"把 4 个值都填好，下面只在需要转弯时改动其中几个。
+      // 这样就不用每个分支都写一遍，也不会漏掉某个脚。
+      int leftGo   = fastLeft;    // 左轮 前进值
+      int leftRev  = 0;           // 左轮 反转值
+      int rightGo  = speedFast;   // 右轮 前进值
+      int rightRev = 0;           // 右轮 反转值
+
+      if (leftBlack == 1 && rightBlack == 0) {
+        // 只有左边压到黑线 -> 线在车的左边 -> 车偏右 -> 向左转。
+        // 左轮当"内侧"往后倒，右轮当"外侧"往前冲，车身几乎是原地转。
+        leftGo   = 0;
+        leftRev  = speedBack;
+        rightGo  = speedTurn;
+      }
+      else if (leftBlack == 0 && rightBlack == 1) {
+        // 只有右边压到黑线 -> 线在车的右边 -> 车偏左 -> 向右转。
+        leftGo   = turnLeft;
+        rightGo  = 0;
+        rightRev = speedBack;
+      }
+      // 剩下两种情况都是直行，直接用上面填好的默认值：
+      //   两个都白 = 车正正压在线上（本车是"夹住线"的摆法）
+      //   两个都黑 = 起始线
+
+      // ---------- ④ 一次性把 4 个脚写出去 ----------
+      // 只在这一处写，就不会出现"某个脚忘了写、残留上一次的反转"
+      analogWrite(leftForward,  leftGo);
+      analogWrite(leftBack,     leftRev);
+      analogWrite(rightForward, rightGo);
+      analogWrite(rightBack,    rightRev);
+
+      // ---- 3 分钟超时保护 ----
+      if (millis() - startTime > lapMaxMs) {
+        finished = 0;
+        break;
+      }
+
+      // ---- 每 100 毫秒刷新一次屏幕 ----
+      if (millis() - oledTime > oledMs) {
+        oledTime = millis();
+
+        passed      = millis() - startTime;   // 已经过去多少毫秒
+        totalSecond = passed / 1000;          // 换算成整秒
+        minute      = totalSecond / 60;       // 分钟
+        second      = totalSecond % 60;       // 秒（% 是取余数）
+        hundredth   = (passed % 1000) / 10;   // 百分秒
+
+        oled.clearDisplay();
+        oled.setTextSize(1);
+        oled.setCursor(0, 0);
+        oled.println(F("Running"));
+
+        // 大号字显示  分:秒.百分秒
+        oled.setTextSize(2);
+        oled.setCursor(0, 20);
+        if (minute < 10) oled.print(F("0"));     // 补 0，让数字宽度固定，看着不跳
+        oled.print(minute);
+        oled.print(F(":"));
+        if (second < 10) oled.print(F("0"));
+        oled.print(second);
+        oled.print(F("."));
+        if (hundredth < 10) oled.print(F("0"));
+        oled.print(hundredth);
+
+        // 画 3 分钟进度条
+        int bar = (int)((millis() - startTime) * 100 / lapMaxMs);
+        if (bar > 100) bar = 100;
+        oled.drawRect(0, 54, 104, 10, SSD1306_WHITE);   // 先画外面的方框
+        oled.fillRect(2, 56, bar, 6, SSD1306_WHITE);    // 再用实心块表示进度
+
+        oled.display();
+      }
+    }
+  }
+
+  // -----------------------------------------------------------------
+  // 第五步：停车，显示成绩
+  // -----------------------------------------------------------------
   analogWrite(leftForward, 0);
   analogWrite(leftBack, 0);
   analogWrite(rightForward, 0);
@@ -464,13 +393,13 @@ void loop() {
   digitalWrite(ledRun, LOW);
   digitalWrite(ledStat, LOW);
 
-  unsigned long passed = millis() - startTime;
-  int totalSecond = passed / 1000;
-  int minute      = totalSecond / 60;
-  int second      = totalSecond % 60;
-  int hundredth   = (passed % 1000) / 10;
+  passed      = millis() - startTime;
+  totalSecond = passed / 1000;
+  minute      = totalSecond / 60;
+  second      = totalSecond % 60;
+  hundredth   = (passed % 1000) / 10;
 
-  // 电机已经停了：跑完高音提示，超时低音提示
+  // 电机已经停止：完成高音提示，超时或发车失败低音提示
   if (finished == 1) {
     tone(buzzer, 1500);
   } else {
@@ -479,6 +408,7 @@ void loop() {
   delay(300);
   noTone(buzzer);
 
+  // 成绩画面
   oled.clearDisplay();
   oled.setTextSize(1);
   oled.setCursor(0, 0);
@@ -488,7 +418,7 @@ void loop() {
     oled.println(F("STOPPED / TIMEOUT"));
   }
   oled.setTextSize(2);
-  oled.setCursor(0, 16);
+  oled.setCursor(0, 24);
   if (minute < 10) oled.print(F("0"));
   oled.print(minute);
   oled.print(F(":"));
@@ -498,36 +428,8 @@ void loop() {
   if (hundredth < 10) oled.print(F("0"));
   oled.print(hundredth);
   oled.setTextSize(1);
-
-  if (debugOled == 1) {
-    // ---- 调试"验尸"画面 ----
-    // L / R 后面是这一趟里左 / 右传感器读到过的【最小-最大】读数。
-    //   如果最大值一直停在白底的水平（比如 760），说明那个传感器整趟都没见过黑线。
-    // 最后一行是四种情况各出现多少次：
-    //   W=两个都白(直行)  L=左黑(左转)  R=右黑(右转)  B=双黑(起始线)
-    oled.setCursor(0, 32);
-    oled.print(F("L "));
-    oled.print(minL);
-    oled.print('-');
-    oled.print(maxL);
-    oled.setCursor(0, 42);
-    oled.print(F("R "));
-    oled.print(minR);
-    oled.print('-');
-    oled.print(maxR);
-    oled.setCursor(0, 52);
-    oled.print(F("W"));
-    oled.print(cntWW);
-    oled.print(F("/L"));
-    oled.print(cntLB);
-    oled.print(F("/R"));
-    oled.print(cntRB);
-    oled.print(F("/B"));
-    oled.print(cntBB);
-  } else {
-    oled.setCursor(0, 48);
-    oled.println(F("press START again"));
-  }
+  oled.setCursor(0, 48);
+  oled.println(F("press START again"));
   oled.display();
 
   // 串口里也打印一份，方便记录成绩
@@ -538,19 +440,5 @@ void loop() {
   Serial.print(F("."));
   Serial.println(hundredth);
 
-  if (debugOled == 1) {
-    // 调试画面停 20 秒，方便走过去看读数；按一下启动键可以提前结束
-    unsigned long watchStart = millis();
-    while (millis() - watchStart < 20000) {
-      if (digitalRead(startButton) == HIGH) {
-        break;
-      }
-      delay(10);
-    }
-    while (digitalRead(startButton) == HIGH) {   // 等手指松开
-      delay(10);
-    }
-  } else {
-    delay(5000);   // 成绩画面保持 5 秒，然后回到开头重新等按键
-  }
+  delay(5000);   // 成绩画面保持 5 秒，然后回到开头重新等按键
 }
